@@ -4,6 +4,7 @@ type SharedServiceOptions<T extends object> = {
   serviceName: string;
   service: T;
   onConsumerChange?: OnConsumerChange;
+  logLevel?: "debug" | "info" | "warn" | "error";
 };
 
 type InFlightRequest<T extends object, K extends keyof T = keyof T> = {
@@ -59,15 +60,7 @@ type ProducerChannelEventData<T extends object, K extends keyof T = keyof T> =
   | ResponseEventData<T, K>;
 
 function generateId() {
-  if (typeof crypto !== "undefined") {
-    return crypto.randomUUID();
-  }
-
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
+  return crypto.randomUUID();
 }
 
 /**
@@ -86,6 +79,42 @@ function createInfinitelyOpenLock(
   });
 }
 
+function createLogger(
+  serviceName: string,
+  logLevel: "none" | "debug" | "info" | "warn" | "error"
+) {
+  const logLevelMap = {
+    none: 0,
+    error: 1,
+    warn: 2,
+    info: 3,
+    debug: 4,
+  };
+
+  return {
+    debug: (...args: unknown[]) => {
+      if (logLevelMap[logLevel] >= logLevelMap.debug) {
+        console.debug(`[${serviceName}]`, ...args);
+      }
+    },
+    info: (...args: unknown[]) => {
+      if (logLevelMap[logLevel] >= logLevelMap.info) {
+        console.info(`[${serviceName}]`, ...args);
+      }
+    },
+    warn: (...args: unknown[]) => {
+      if (logLevelMap[logLevel] >= logLevelMap.warn) {
+        console.warn(`[${serviceName}]`, ...args);
+      }
+    },
+    error: (...args: unknown[]) => {
+      if (logLevelMap[logLevel] >= logLevelMap.error) {
+        console.error(`[${serviceName}]`, ...args);
+      }
+    },
+  };
+}
+
 class SharedService<T extends object> {
   readonly service: T;
   private readonly serviceName: string;
@@ -94,6 +123,7 @@ class SharedService<T extends object> {
   private producerChannel: BroadcastChannel | null;
   private readonly onConsumerChange?: OnConsumerChange;
   private readonly requestsInFlight: Map<string, InFlightRequest<T>>;
+  private readonly logger: ReturnType<typeof createLogger>;
 
   constructor(options: SharedServiceOptions<T>) {
     this.serviceName = options.serviceName;
@@ -105,13 +135,31 @@ class SharedService<T extends object> {
         const typedProperty = property as keyof T;
         const typedPropertyValue = target[typedProperty];
 
-        if (typeof typedPropertyValue !== "function") return typedPropertyValue;
+        if (typeof typedPropertyValue !== "function") {
+          this.logger.debug(
+            `Property ${String(
+              property
+            )} is not a function, returning the property value`
+          );
+          return typedPropertyValue;
+        }
 
         //! this has to be an arrow function to keep the context of `this`
         return async (...args: unknown[]) => {
           if (this.isConsumer) {
+            this.logger.debug(
+              `Consumer invoking method ${String(property)} with args`,
+              args
+            );
             return await typedPropertyValue(...args);
           }
+
+          this.logger.debug(
+            `Producer invoking method ${String(
+              property
+            )} with args, sending request to consumer`,
+            args
+          );
 
           return new Promise((resolve, reject) => {
             const nonce = generateId();
@@ -146,9 +194,27 @@ class SharedService<T extends object> {
     this.producerChannel = null;
     this.requestsInFlight = new Map();
     this.onConsumerChange = options.onConsumerChange;
+    this.logger = createLogger(
+      `shared-service:${this.serviceName}`,
+      options.logLevel ?? "info"
+    );
 
-    this._onBecomeProducer();
+    this._register();
+  }
+
+  private async _register() {
+    //! TODO: fix this as sometimes two contexts can request the lock at the same time but only one will get it
+    const locks = await navigator.locks.query();
+    const consumerExists = locks.held?.find(
+      (lock) => lock.name === `shared-service:${this.serviceName}`
+    );
+    console.log("consumerExists", consumerExists);
+    if (consumerExists) {
+      this.logger.info("Consumer exists, becoming producer...");
+      this._onBecomeProducer();
+    }
     createInfinitelyOpenLock(`shared-service:${this.serviceName}`, async () => {
+      this.logger.info("Consumer does not exist, becoming consumer...");
       await this._onBecomeConsumer();
     });
   }
@@ -166,6 +232,10 @@ class SharedService<T extends object> {
 
         const { producerId } = payload;
 
+        this.logger.info(
+          `Producer with id ${producerId} is registering, creating channel...`
+        );
+
         const producerChannel = new BroadcastChannel(
           `shared-service-producer:${this.serviceName}-${producerId}`
         );
@@ -173,26 +243,50 @@ class SharedService<T extends object> {
           `shared-service-producer:${this.serviceName}-${producerId}`,
           { mode: "exclusive" },
           () => {
+            this.logger.info(
+              `Producer with id ${producerId} has disconnected, closing channel`
+            );
             producerChannel.close();
           }
         );
 
         producerChannel.addEventListener(
           "message",
-          (event: MessageEvent<ProducerChannelEventData<T>>) => {
+          async (event: MessageEvent<ProducerChannelEventData<T>>) => {
             if (event.data.type === "response") return;
             const { nonce, method, args } = event.data.payload;
+
+            this.logger.info(
+              `Received request with nonce ${nonce} for method ${String(
+                method
+              )} with args`,
+              args
+            );
 
             let result: unknown = null;
             let error: unknown = null;
             try {
               if (typeof this.service[method] !== "function") {
-                throw new Error(`Method ${String(method)} is not a function`);
+                throw new Error(
+                  `Expected to receive a function, but received ${String(
+                    method
+                  )}`
+                );
               }
-              result = this.service[method](...args);
+              result = await this.service[method](...args);
             } catch (e) {
+              this.logger.error(
+                `Error occurred while invoking method ${String(method)}: ${e}`
+              );
               error = e;
             }
+
+            this.logger.debug(
+              `Sending response with nonce ${nonce} for method ${String(
+                method
+              )} with result`,
+              result
+            );
 
             producerChannel.postMessage({
               type: "response",
@@ -204,6 +298,8 @@ class SharedService<T extends object> {
             });
           }
         );
+
+        this.logger.info(`Producer with id ${producerId} registered`);
 
         this.sharedChannel.postMessage({
           type: "producer-registered",
@@ -235,8 +331,9 @@ class SharedService<T extends object> {
     }
   }
 
-  private _onBecomeProducer() {
+  private async _onBecomeProducer() {
     const producerId = generateId();
+    console.log("producerId", producerId);
     // create a lock for the producer, so that when this lock is released, the consumer knows the provider is gone and can close the channel
     createInfinitelyOpenLock(
       `shared-service-producer:${this.serviceName}-${producerId}`
@@ -272,7 +369,11 @@ class SharedService<T extends object> {
     this.sharedChannel.addEventListener(
       "message",
       async (event: MessageEvent<SharedChannelEventData>) => {
-        if (event.data.type === "consumer-change" && !this.isConsumer) {
+        if (event.data.type === "consumer-change") {
+          if (this.isConsumer) {
+            throw new Error("Producer cannot become consumer");
+          }
+
           await this.onConsumerChange?.(this.isConsumer);
           await register();
 

@@ -59,6 +59,13 @@ h1 {
   padding: 2em;
 }
 
+.service-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+  gap: 0.5em;
+  padding: 2em;
+}
+
 .read-the-docs {
   color: #888;
 }

@@ -1,9 +1,17 @@
 type OnConsumerChange = (isConsumer: boolean) => void | Promise<void>;
 
+type Logger = {
+  debug: (...args: unknown[]) => void;
+  info: (...args: unknown[]) => void;
+  warn: (...args: unknown[]) => void;
+  error: (...args: unknown[]) => void;
+};
+
 type SharedServiceOptions<T extends object> = {
   serviceName: string;
   service: T;
   onConsumerChange?: OnConsumerChange;
+  logger?: Logger;
   logLevel?: "debug" | "info" | "warn" | "error";
 };
 
@@ -129,7 +137,7 @@ class SharedService<T extends object> {
   private producerChannel: BroadcastChannel | null;
   private readonly onConsumerChange?: OnConsumerChange;
   private readonly requestsInFlight: Map<string, InFlightRequest<T>>;
-  private readonly logger: ReturnType<typeof createLogger>;
+  private readonly logger: Logger;
 
   constructor(options: SharedServiceOptions<T>) {
     this.serviceName = options.serviceName;
@@ -198,10 +206,12 @@ class SharedService<T extends object> {
     this.producerChannel = null;
     this.requestsInFlight = new Map();
     this.onConsumerChange = options.onConsumerChange;
-    this.logger = createLogger(
-      `shared-service:${this.serviceName}`,
-      options.logLevel ?? "info"
-    );
+    this.logger =
+      options.logger ??
+      createLogger(
+        `shared-service:${this.serviceName}`,
+        options.logLevel ?? "info"
+      );
 
     this._register();
   }
@@ -233,7 +243,7 @@ class SharedService<T extends object> {
     // listen to newly registered consumers
     this.sharedChannel.addEventListener(
       "message",
-      (event: MessageEvent<ProducerRegistrationEventData>) => {
+      async (event: MessageEvent<ProducerRegistrationEventData>) => {
         const { type, payload } = event.data;
         if (type !== "producer-registration") return;
 
@@ -340,10 +350,7 @@ class SharedService<T extends object> {
 
   private async _onBecomeProducer() {
     const producerId = generateId();
-    // create a lock for the producer, so that when this lock is released, the consumer knows the provider is gone and can close the channel
-    createInfinitelyOpenLock(
-      `shared-service-producer:${this.serviceName}-${producerId}`
-    );
+
     this.producerChannel = new BroadcastChannel(
       `shared-service-producer:${this.serviceName}-${producerId}`
     );
@@ -407,6 +414,12 @@ class SharedService<T extends object> {
           }
         }
       }
+    );
+
+    // create a lock for the producer, so that when this lock is released, the consumer knows the provider is gone and can close the channel
+    createInfinitelyOpenLock(
+      `shared-service-producer:${this.serviceName}-${producerId}`,
+      register
     );
   }
 

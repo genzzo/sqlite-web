@@ -1,21 +1,12 @@
 import "./style.css";
-import typescriptLogo from "./typescript.svg";
-import viteLogo from "/vite.svg";
-import { setupCounter } from "./counter.ts";
 import { createSharedService } from "./shared-service.ts";
 
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <div>
-    <a href="https://vite.dev" target="_blank">
-      <img src="${viteLogo}" class="logo" alt="Vite logo" />
-    </a>
-    <a href="https://www.typescriptlang.org/" target="_blank">
-      <img src="${typescriptLogo}" class="logo vanilla" alt="TypeScript logo" />
-    </a>
-    <h1>Vite + TypeScript</h1>
-    <div class="card">
-      <button id="counter" type="button"></button>
-    </div>
+    <h1>Shared Service Test</h1>
+
+    <div id="log"></div>
+
     <div class="service-actions">
       <button id="service-add" type="button">Add</button>
       <button id="service-subtract" type="button">Subtract</button>
@@ -26,16 +17,23 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       <button id="service-slowMultiply" type="button">Slow Multiply</button>
       <button id="service-slowDivide" type="button">Slow Divide</button>
     </div>
-    <p class="read-the-docs">
-      Click on the Vite and TypeScript logos to learn more
-    </p>
   </div>
 `;
+
+const logElement = document.querySelector<HTMLDivElement>("#log")!;
+const addMessageToLog = (message: string) => {
+  const p = document.createElement("p");
+  const timeStamp = new Date().toLocaleTimeString();
+  p.innerText = `[${timeStamp}] ${message}`;
+  logElement.appendChild(p);
+  logElement.scrollTop = logElement.scrollHeight;
+};
 
 const randomInt = () => Math.floor(Math.random() * 1000);
 const operation = (a: number, b: number, op: "+" | "-" | "*" | "/") => {
   console.log(`Evaluating ${a} ${op} ${b}`);
   const result = eval(`${a} ${op} ${b}`) as number;
+  addMessageToLog(`Evaluated ${a} ${op} ${b} = ${result}`);
   console.log(`Evaluated ${a} ${op} ${b} = ${result}`);
   return result;
 };
@@ -48,6 +46,7 @@ const slowOperation = async (
   console.log(`Evaluating ${a} ${op} ${b} slowly`);
   await new Promise((resolve) => setTimeout(resolve, 3000));
   const result = eval(`${a} ${op} ${b}`) as number;
+  addMessageToLog(`Evaluated ${a} ${op} ${b} = ${result}`);
   console.log(`Evaluated ${a} ${op} ${b} = ${result}`);
   return result;
 };
@@ -87,11 +86,12 @@ const s = createSharedService({
   serviceName: "counter",
   service: mockService,
   async onConsumerChange(isConsumer) {
-    await new Promise((r) => setTimeout(r, randomInt() * 5));
+    // await new Promise((r) => setTimeout(r, randomInt() * 5));
     console.log("Consumer change", isConsumer);
   },
 });
 
+console.log("AAAAAAAAAA");
 s.add(randomInt(), randomInt());
 // s.service.subtract(randomInt(), randomInt());
 // s.service.multiply(randomInt(), randomInt());
@@ -114,5 +114,3 @@ s.add(randomInt(), randomInt());
       s[method](randomInt(), randomInt());
     });
 });
-
-setupCounter(document.querySelector<HTMLButtonElement>("#counter")!);

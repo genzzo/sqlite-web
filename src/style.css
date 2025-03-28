@@ -42,21 +42,25 @@ h1 {
   text-align: center;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: filter 300ms;
-}
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
-}
-.logo.vanilla:hover {
-  filter: drop-shadow(0 0 2em #3178c6aa);
+#log {
+  height: 200px;
+  background-color: #1a1a1a;
+  border-radius: 0.25rem;
+  padding: 0.25em 1em;
+  color: #888;
+  overflow: auto;
+  font-family: monospace;
 }
 
-.card {
-  padding: 2em;
+#log p {
+  text-align: left;
+  margin: 0.2em 0;
+}
+
+#count {
+  font-size: 1.5em;
+  font-weight: 500;
+  color: #fff;
 }
 
 .service-actions {
@@ -64,10 +68,10 @@ h1 {
   grid-template-columns: 1fr 1fr 1fr 1fr;
   gap: 0.5em;
   padding: 2em;
-}
 
-.read-the-docs {
-  color: #888;
+  @media (max-width: 800px) {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 button {

@@ -59,6 +59,12 @@ type ProducerChannelEventData<T extends object, K extends keyof T = keyof T> =
   | RequestEventData<T, K>
   | ResponseEventData<T, K>;
 
+type SharedServiceProxy<T extends object> = {
+  [K in keyof T]: T[K] extends (...args: infer A) => infer R
+    ? (...args: A) => Promise<R>
+    : T[K];
+};
+
 function generateId() {
   return crypto.randomUUID();
 }
@@ -69,11 +75,11 @@ function generateId() {
  */
 function createInfinitelyOpenLock(
   name: string,
-  callback?: () => void | Promise<void>
+  callback?: (lock: Lock | null) => void | Promise<void>
 ) {
-  navigator.locks.request(name, { mode: "exclusive" }, async () => {
+  navigator.locks.request(name, { mode: "exclusive" }, async (lock) => {
     if (callback !== undefined) {
-      await callback();
+      await callback(lock);
     }
     await new Promise(() => {});
   });
@@ -116,7 +122,7 @@ function createLogger(
 }
 
 class SharedService<T extends object> {
-  readonly service: T;
+  readonly serviceProxy: SharedServiceProxy<T>;
   private readonly serviceName: string;
   private readonly sharedChannel: BroadcastChannel;
   private isConsumer: boolean;
@@ -127,8 +133,7 @@ class SharedService<T extends object> {
 
   constructor(options: SharedServiceOptions<T>) {
     this.serviceName = options.serviceName;
-    this.service = new Proxy(options.service, {
-      //! this has to be an arrow function to keep the context of `this`
+    this.serviceProxy = new Proxy(options.service, {
       get: (target, property) => {
         if (typeof property === "symbol") return undefined;
 
@@ -144,7 +149,6 @@ class SharedService<T extends object> {
           return typedPropertyValue;
         }
 
-        //! this has to be an arrow function to keep the context of `this`
         return async (...args: unknown[]) => {
           if (this.isConsumer) {
             this.logger.debug(
@@ -186,7 +190,7 @@ class SharedService<T extends object> {
           });
         };
       },
-    });
+    }) as SharedServiceProxy<T>;
     this.sharedChannel = new BroadcastChannel(
       `shared-service:${this.serviceName}`
     );
@@ -203,13 +207,16 @@ class SharedService<T extends object> {
   }
 
   private async _register() {
-    //! TODO: fix this as sometimes two contexts can request the lock at the same time but only one will get it
-    const locks = await navigator.locks.query();
-    const consumerExists = locks.held?.find(
-      (lock) => lock.name === `shared-service:${this.serviceName}`
+    const registrationExists = !!sessionStorage.getItem(
+      `shared-service-registration:${this.serviceName}`
     );
-    console.log("consumerExists", consumerExists);
-    if (consumerExists) {
+    if (!registrationExists) {
+      sessionStorage.setItem(
+        `shared-service-registration:${this.serviceName}`,
+        "true"
+      );
+    }
+    if (registrationExists) {
       this.logger.info("Consumer exists, becoming producer...");
       this._onBecomeProducer();
     }
@@ -266,14 +273,14 @@ class SharedService<T extends object> {
             let result: unknown = null;
             let error: unknown = null;
             try {
-              if (typeof this.service[method] !== "function") {
+              if (typeof this.serviceProxy[method] !== "function") {
                 throw new Error(
                   `Expected to receive a function, but received ${String(
                     method
                   )}`
                 );
               }
-              result = await this.service[method](...args);
+              result = await this.serviceProxy[method](...args);
             } catch (e) {
               this.logger.error(
                 `Error occurred while invoking method ${String(method)}: ${e}`
@@ -316,7 +323,7 @@ class SharedService<T extends object> {
       for (const [nonce, { method, args, resolve, reject }] of this
         .requestsInFlight) {
         try {
-          const requestMethodValue = this.service[method];
+          const requestMethodValue = this.serviceProxy[method];
           if (typeof requestMethodValue !== "function") {
             throw new Error(`Method ${String(method)} is not a function`);
           }
@@ -333,7 +340,6 @@ class SharedService<T extends object> {
 
   private async _onBecomeProducer() {
     const producerId = generateId();
-    console.log("producerId", producerId);
     // create a lock for the producer, so that when this lock is released, the consumer knows the provider is gone and can close the channel
     createInfinitelyOpenLock(
       `shared-service-producer:${this.serviceName}-${producerId}`
@@ -432,5 +438,5 @@ class SharedService<T extends object> {
 export function createSharedService<T extends object>(
   options: SharedServiceOptions<T>
 ) {
-  return new SharedService(options);
+  return new SharedService(options).serviceProxy;
 }

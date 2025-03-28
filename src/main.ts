@@ -86,9 +86,15 @@ const mockService = {
 const s = createSharedService({
   serviceName: "counter",
   service: mockService,
+  async onConsumerChange(isConsumer) {
+    await new Promise((r) => setTimeout(r, randomInt() * 5));
+    console.log("Consumer change", isConsumer);
+  },
 });
 
-console.log(s.service.staticField);
+s.add(randomInt(), randomInt());
+// s.service.subtract(randomInt(), randomInt());
+// s.service.multiply(randomInt(), randomInt());
 
 (
   [
@@ -105,7 +111,7 @@ console.log(s.service.staticField);
   document
     .querySelector<HTMLButtonElement>(`#service-${method}`)!
     .addEventListener("click", () => {
-      s.service[method](randomInt(), randomInt());
+      s[method](randomInt(), randomInt());
     });
 });
 

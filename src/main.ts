@@ -5,7 +5,11 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <div>
     <h1>Shared Service Test</h1>
 
-    <div id="log"></div>
+    <div class="log-container">
+      <div id="log">
+        <button id="clear-log" type="button">🧹<span> Clear</span></button>
+      </div>
+    </div>
 
     <div class="service-actions">
       <button id="service-add" type="button">Add</button>
@@ -21,6 +25,18 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 `;
 
 const logElement = document.querySelector<HTMLDivElement>("#log")!;
+const clearLogButton = document.querySelector<HTMLButtonElement>("#clear-log")!;
+
+clearLogButton.addEventListener("click", () => {
+  for (let i = logElement.children.length - 1; i >= 0; i--) {
+    const child = logElement.children[i];
+    if (child.id !== "clear-log") {
+      logElement.removeChild(child);
+    }
+  }
+  logElement.scrollTop = logElement.scrollHeight;
+});
+
 const addMessageToLog = (message: string) => {
   const p = document.createElement("p");
   const timeStamp = new Date().toLocaleTimeString();
@@ -87,7 +103,7 @@ const s = createSharedService({
   service: mockService,
   async onConsumerChange(isConsumer) {
     // await new Promise((r) => setTimeout(r, randomInt() * 5));
-    console.log("Consumer change", isConsumer);
+    logElement.style.display = isConsumer ? "block" : "none";
   },
 });
 

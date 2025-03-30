@@ -163,7 +163,30 @@ class SharedService<T extends object> {
               `Consumer invoking method ${String(property)} with args`,
               args
             );
-            return await typedPropertyValue(...args);
+
+            const consumerRequestsInFlight = JSON.parse(
+              sessionStorage.getItem(
+                `shared-service-consumer-requests-in-flight:${this.serviceName}`
+              ) ?? "{}"
+            ) as Record<string, Pick<InFlightRequest<T>, "method" | "args">>;
+            const nonce = generateId();
+
+            consumerRequestsInFlight[nonce] = {
+              method: typedProperty,
+              args,
+            };
+            sessionStorage.setItem(
+              `shared-service-consumer-requests-in-flight:${this.serviceName}`,
+              JSON.stringify(consumerRequestsInFlight)
+            );
+
+            const returnValue = await typedPropertyValue(...args);
+            delete consumerRequestsInFlight[nonce];
+            sessionStorage.setItem(
+              `shared-service-consumer-requests-in-flight:${this.serviceName}`,
+              JSON.stringify(consumerRequestsInFlight)
+            );
+            return returnValue;
           }
 
           this.logger.debug(
@@ -346,6 +369,37 @@ class SharedService<T extends object> {
         }
       }
     }
+
+    const previousConsumerRequestsInFlight = JSON.parse(
+      sessionStorage.getItem(
+        `shared-service-consumer-requests-in-flight:${this.serviceName}`
+      ) ?? "{}"
+    ) as Record<string, Pick<InFlightRequest<T>, "method" | "args">>;
+    console.log(
+      `Previous consumer requests in flight: ${JSON.stringify(
+        previousConsumerRequestsInFlight
+      )}`
+    );
+    for (const [nonce, { method, args }] of Object.entries(
+      previousConsumerRequestsInFlight
+    )) {
+      try {
+        const requestMethodValue = this.serviceProxy[method];
+        if (typeof requestMethodValue !== "function") {
+          throw new Error(`Method ${String(method)} is not a function`);
+        }
+        await requestMethodValue(...args);
+        delete previousConsumerRequestsInFlight[nonce];
+        sessionStorage.setItem(
+          `shared-service-consumer-requests-in-flight:${this.serviceName}`,
+          JSON.stringify(previousConsumerRequestsInFlight)
+        );
+      } catch (error) {
+        this.logger.error(
+          `Error occurred while invoking method ${String(method)}: ${error}`
+        );
+      }
+    }
   }
 
   private async _onBecomeProducer() {
@@ -377,6 +431,7 @@ class SharedService<T extends object> {
           payload: { producerId },
         });
       });
+      await this.onConsumerChange?.(this.isConsumer);
     };
 
     this.sharedChannel.addEventListener(

@@ -137,6 +137,7 @@ class SharedService<T extends object> {
   private producerChannel: BroadcastChannel | null;
   private readonly onConsumerChange?: OnConsumerChange;
   private readonly requestsInFlight: Map<string, InFlightRequest<T>>;
+  private readonly registeredProducers: Set<string>;
   private readonly logger: Logger;
 
   constructor(options: SharedServiceOptions<T>) {
@@ -228,6 +229,7 @@ class SharedService<T extends object> {
     this.isConsumer = false;
     this.producerChannel = null;
     this.requestsInFlight = new Map();
+    this.registeredProducers = new Set();
     this.onConsumerChange = options.onConsumerChange;
     this.logger =
       options.logger ??
@@ -272,6 +274,13 @@ class SharedService<T extends object> {
 
         const { producerId } = payload;
 
+        if (this.registeredProducers.has(producerId)) {
+          this.logger.error(
+            `Producer with id ${producerId} already registered`
+          );
+          return;
+        }
+
         this.logger.info(
           `Producer with id ${producerId} is registering, creating channel...`
         );
@@ -284,8 +293,9 @@ class SharedService<T extends object> {
           { mode: "exclusive" },
           () => {
             this.logger.info(
-              `Producer with id ${producerId} has disconnected, closing channel`
+              `Producer with id ${producerId} has disconnected, cleaning up`
             );
+            this.registeredProducers.delete(producerId);
             producerChannel.close();
           }
         );
@@ -338,6 +348,8 @@ class SharedService<T extends object> {
             });
           }
         );
+
+        this.registeredProducers.add(producerId);
 
         this.logger.info(`Producer with id ${producerId} registered`);
 

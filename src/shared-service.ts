@@ -77,6 +77,42 @@ function generateId() {
   return crypto.randomUUID();
 }
 
+async function retry<T>(
+  fn: () => T | Promise<T>,
+  options: {
+    retries: number;
+    delay: number | ((attempt: number) => number);
+  } = {
+    retries: 3,
+    delay: (attempt: number) => Math.pow(2, attempt) * 250,
+  }
+) {
+  const { retries, delay } = options;
+  if (retries < 0) {
+    throw new Error("Retries must be greater than or equal to 0");
+  }
+  if (typeof delay !== "number" && typeof delay !== "function") {
+    throw new Error("Delay must be a number or a function");
+  }
+
+  let attempt = 0;
+
+  while (attempt <= retries) {
+    try {
+      return await fn();
+    } catch (error) {
+      attempt++;
+      if (attempt > retries) {
+        throw new Error(
+          `Function failed after ${retries + 1} attempts. Error: ${error}`
+        );
+      }
+      const currentDelay = typeof delay === "function" ? delay(attempt) : delay;
+      await new Promise((res) => setTimeout(res, currentDelay));
+    }
+  }
+}
+
 /**
  * Creates an exclusive {@link https://developer.mozilla.org/en-US/docs/Web/API/Lock Web Lock} with an unresolved promise.
  * This lock will never be released until the context is destroyed. This is useful for tracking the lifetime of the context and implementing a context queue.
@@ -239,19 +275,33 @@ class SharedService<T extends object> {
       );
 
     this._register();
+
+    // if querying of the lock returns false for two contexts, then only one will be capture the lock and the other will never be connected to the service
+    // so here we retry again shortly after the first attempt, to ensure that we account for race conditions when multiple contexts are trying to register at once
+    setTimeout(() => {
+      if (!this.isConsumer && !this.producerChannel) {
+        this.logger.info(
+          "Service did not register as a producer nor as a consumer, retrying..."
+        );
+        retry(async () => {
+          await this._register();
+          if (!this.isConsumer && !this.producerChannel) {
+            throw new Error(
+              "Service did not register as a producer nor as a consumer"
+            );
+          }
+        });
+      }
+    }, 200);
   }
 
   private async _register() {
-    const registrationExists = !!sessionStorage.getItem(
-      `shared-service-registration:${this.serviceName}`
+    const locks = await navigator.locks.query();
+    const sharedServiceLockExists = locks.held?.some(
+      (lock) => lock.name === `shared-service:${this.serviceName}`
     );
-    if (!registrationExists) {
-      sessionStorage.setItem(
-        `shared-service-registration:${this.serviceName}`,
-        "true"
-      );
-    }
-    if (registrationExists) {
+
+    if (sharedServiceLockExists) {
       this.logger.info("Consumer exists, becoming producer...");
       this._onBecomeProducer();
     }

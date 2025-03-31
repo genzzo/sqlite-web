@@ -1,3 +1,5 @@
+import { IDBKeyValueStore, KeyValueStore } from "./kv-stores";
+
 type OnConsumerChange = (isConsumer: boolean) => void | Promise<void>;
 
 type Logger = {
@@ -173,6 +175,11 @@ class SharedService<T extends object> {
   private producerChannel: BroadcastChannel | null;
   private readonly onConsumerChange?: OnConsumerChange;
   private readonly requestsInFlight: Map<string, InFlightRequest<T>>;
+  private readonly consumerInFlightRequestsStore: KeyValueStore<
+    Omit<InFlightRequest<T>, "resolve" | "reject"> & {
+      nonce: string;
+    }
+  >;
   private readonly registeredProducers: Set<string>;
   private readonly logger: Logger;
 
@@ -201,28 +208,15 @@ class SharedService<T extends object> {
               args
             );
 
-            const consumerRequestsInFlight = JSON.parse(
-              sessionStorage.getItem(
-                `shared-service-consumer-requests-in-flight:${this.serviceName}`
-              ) ?? "{}"
-            ) as Record<string, Pick<InFlightRequest<T>, "method" | "args">>;
             const nonce = generateId();
-
-            consumerRequestsInFlight[nonce] = {
+            await this.consumerInFlightRequestsStore.set(nonce, {
+              nonce,
               method: typedProperty,
               args,
-            };
-            sessionStorage.setItem(
-              `shared-service-consumer-requests-in-flight:${this.serviceName}`,
-              JSON.stringify(consumerRequestsInFlight)
-            );
+            });
 
             const returnValue = await typedPropertyValue(...args);
-            delete consumerRequestsInFlight[nonce];
-            sessionStorage.setItem(
-              `shared-service-consumer-requests-in-flight:${this.serviceName}`,
-              JSON.stringify(consumerRequestsInFlight)
-            );
+            this.consumerInFlightRequestsStore.delete(nonce);
             return returnValue;
           }
 
@@ -267,6 +261,17 @@ class SharedService<T extends object> {
     this.requestsInFlight = new Map();
     this.registeredProducers = new Set();
     this.onConsumerChange = options.onConsumerChange;
+    this.consumerInFlightRequestsStore = new IDBKeyValueStore<
+      Omit<
+        InFlightRequest<T> & {
+          nonce: string;
+        },
+        "resolve" | "reject"
+      >
+    >(
+      `shared-service-consumer-requests-in-flight-ABC:${this.serviceName}`,
+      `shared-service-consumer-requests-in-flight-ABC:${this.serviceName}`
+    );
     this.logger =
       options.logger ??
       createLogger(
@@ -432,36 +437,27 @@ class SharedService<T extends object> {
       }
     }
 
-    const previousConsumerRequestsInFlight = JSON.parse(
-      sessionStorage.getItem(
-        `shared-service-consumer-requests-in-flight:${this.serviceName}`
-      ) ?? "{}"
-    ) as Record<string, Pick<InFlightRequest<T>, "method" | "args">>;
-    console.log(
-      `Previous consumer requests in flight: ${JSON.stringify(
-        previousConsumerRequestsInFlight
-      )}`
-    );
-    for (const [nonce, { method, args }] of Object.entries(
-      previousConsumerRequestsInFlight
-    )) {
-      try {
-        const requestMethodValue = this.serviceProxy[method];
-        if (typeof requestMethodValue !== "function") {
-          throw new Error(`Method ${String(method)} is not a function`);
+    const previousConsumerRequestsInFlight =
+      await this.consumerInFlightRequestsStore.getAll();
+
+    await Promise.allSettled(
+      previousConsumerRequestsInFlight.map(async ({ nonce, method, args }) => {
+        try {
+          const requestMethodValue = this.serviceProxy[method];
+          if (typeof requestMethodValue !== "function") {
+            throw new Error(`Method ${String(method)} is not a function`);
+          }
+          await requestMethodValue(...args);
+          this.consumerInFlightRequestsStore.delete(nonce);
+        } catch (error) {
+          this.logger.error(
+            `Error occurred while invoking method ${String(method)}: ${error}`
+          );
+        } finally {
+          this.consumerInFlightRequestsStore.delete(nonce);
         }
-        await requestMethodValue(...args);
-        delete previousConsumerRequestsInFlight[nonce];
-        sessionStorage.setItem(
-          `shared-service-consumer-requests-in-flight:${this.serviceName}`,
-          JSON.stringify(previousConsumerRequestsInFlight)
-        );
-      } catch (error) {
-        this.logger.error(
-          `Error occurred while invoking method ${String(method)}: ${error}`
-        );
-      }
-    }
+      })
+    );
   }
 
   private async _onBecomeProducer() {

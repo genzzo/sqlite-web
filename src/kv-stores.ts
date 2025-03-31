@@ -9,6 +9,7 @@ export type KeyValueStore<T> = {
     keyValuePairs: [string, (value: T | undefined) => T][]
   ) => Promise<void>;
   deleteMany: (keys: string[]) => Promise<void>;
+  getAll: () => Promise<T[]>;
   clear: () => Promise<void>;
 };
 
@@ -57,8 +58,99 @@ export class InMemoryKeyValueStore<T> implements KeyValueStore<T> {
     keys.forEach((key) => this.store.delete(key));
   }
 
+  async getAll() {
+    return Array.from(this.store.values());
+  }
+
   async clear() {
     this.store.clear();
+  }
+}
+
+export class SessionStorageKeyValueStore<T> implements KeyValueStore<T> {
+  private readonly storeName: string;
+  private serializer: (value: T) => string;
+  private deserializer: (value: string) => T;
+
+  constructor(
+    storeName: string,
+    options?: {
+      serializer?: (value: T) => string;
+      deserializer?: (value: string) => T;
+    }
+  ) {
+    this.storeName = storeName;
+    this.serializer = options?.serializer || JSON.stringify;
+    this.deserializer = options?.deserializer || JSON.parse;
+  }
+
+  private _getKey(baseKey: string) {
+    return `${this.storeName}:${baseKey}`;
+  }
+
+  private _getValue(key: string): T | undefined {
+    const value = sessionStorage.getItem(key);
+    return value ? this.deserializer(value) : undefined;
+  }
+
+  async get(key: string) {
+    return this._getValue(this._getKey(key));
+  }
+
+  async set(key: string, value: T) {
+    sessionStorage.setItem(this._getKey(key), this.serializer(value));
+  }
+
+  async update(key: string, updater: (value: T | undefined) => T) {
+    const value = this._getValue(this._getKey(key));
+    const newValue = updater(value);
+    sessionStorage.setItem(this._getKey(key), this.serializer(newValue));
+  }
+
+  async delete(key: string) {
+    sessionStorage.removeItem(this._getKey(key));
+  }
+
+  async getMany(keys: string[]) {
+    return keys.map((key) => this._getValue(this._getKey(key)));
+  }
+
+  async setMany(keyValuePairs: [string, T][]) {
+    keyValuePairs.forEach(([key, value]) => {
+      sessionStorage.setItem(this._getKey(key), this.serializer(value));
+    });
+  }
+
+  async updateMany(keyValuePairs: [string, (value: T | undefined) => T][]) {
+    keyValuePairs.forEach(([key, updater]) => {
+      const value = this._getValue(this._getKey(key));
+      const newValue = updater(value);
+      sessionStorage.setItem(this._getKey(key), this.serializer(newValue));
+    });
+  }
+
+  async deleteMany(keys: string[]) {
+    keys.forEach((key) => sessionStorage.removeItem(this._getKey(key)));
+  }
+  async getAll() {
+    const allValues: T[] = [];
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i);
+      if (key && key.startsWith(this.storeName)) {
+        const value = this._getValue(key);
+        if (value) allValues.push(value);
+      }
+    }
+    return allValues;
+  }
+
+  async clear() {
+    for (let i = sessionStorage.length - 1; i >= 0; i--) {
+      const key = sessionStorage.key(i);
+      if (key && key.startsWith(this.storeName)) {
+        sessionStorage.removeItem(key);
+      }
+    }
   }
 }
 
@@ -97,10 +189,7 @@ export class IDBKeyValueStore<T> implements KeyValueStore<T> {
 
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
-      const objectStore = db.createObjectStore(this.storeName, {
-        keyPath: "key",
-      });
-      objectStore.createIndex("key", "key", { unique: true });
+      db.createObjectStore(this.storeName);
     };
 
     this.db = await IDBKeyValueStore._promisifyRequest(request);
@@ -125,6 +214,7 @@ export class IDBKeyValueStore<T> implements KeyValueStore<T> {
   async set(key: string, value: T) {
     const store = await this._getTransactionStore("readwrite");
     const request = store.put(value, key);
+
     await IDBKeyValueStore._promisifyRequest(request);
   }
 
@@ -186,6 +276,24 @@ export class IDBKeyValueStore<T> implements KeyValueStore<T> {
     const store = await this._getTransactionStore("readwrite");
     const requests = keys.map((key) => store.delete(key));
     await Promise.all(requests);
+  }
+
+  async getAll() {
+    const store = await this._getTransactionStore("readonly");
+    const allValues: T[] = [];
+    return new Promise<T[]>((resolve, reject) => {
+      const request = store.openCursor();
+      request.onsuccess = (event) => {
+        const cursor = (event.target as IDBRequest).result;
+        if (cursor) {
+          allValues.push(cursor.value);
+          cursor.continue();
+        } else {
+          resolve(allValues);
+        }
+      };
+      request.onerror = () => reject(request.error);
+    });
   }
 
   async clear() {

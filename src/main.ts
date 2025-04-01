@@ -1,5 +1,6 @@
 import "./style.css";
 import { createSharedService } from "./shared-service.ts";
+import { createWorkerClient } from "./utils.ts";
 
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <div>
@@ -130,3 +131,25 @@ s.add(randomInt(), randomInt());
       s[method](randomInt(), randomInt());
     });
 });
+
+const worker = new Worker(new URL("./worker.ts", import.meta.url), {
+  type: "module",
+});
+
+const workerApi = createWorkerClient<{
+  increment: () => void;
+  decrement: () => void;
+  getNumber: () => number;
+  reset: () => void;
+  setNumber: (value: number) => void;
+}>(worker);
+
+async function updateNumber() {
+  let number = await workerApi.getNumber();
+  console.log("Number from worker:", number);
+  await workerApi.setNumber(randomInt());
+  number = await workerApi.getNumber();
+  console.log("Number from worker after set:", number);
+}
+
+updateNumber();

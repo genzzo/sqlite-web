@@ -1,52 +1,80 @@
-export type KeyValueStore<T> = {
-  get: (key: string) => Promise<T | undefined>;
-  set: (key: string, value: T) => Promise<void>;
-  update: (key: string, updater: (value: T | undefined) => T) => Promise<void>;
-  delete: (key: string) => Promise<void>;
-  getMany: (keys: string[]) => Promise<(T | undefined)[]>;
-  setMany: (keyValuePairs: [string, T][]) => Promise<void>;
-  updateMany: (
-    keyValuePairs: [string, (value: T | undefined) => T][]
-  ) => Promise<void>;
-  deleteMany: (keys: string[]) => Promise<void>;
-  getAll: () => Promise<T[]>;
-  clear: () => Promise<void>;
+export type SyncKeyValueStore<T> = {
+  get: (key: string) => T | undefined;
+  set: (key: string, value: T) => void;
+  update: (key: string, updater: (value: T | undefined) => T) => void;
+  delete: (key: string) => void;
+  getMany: (keys: string[]) => (T | undefined)[];
+  setMany: (keyValuePairs: [string, T][]) => void;
+  updateMany: (keyValuePairs: [string, (value: T | undefined) => T][]) => void;
+  deleteMany: (keys: string[]) => void;
+  getAll: () => T[];
+  clear: () => void;
 };
 
-export class InMemoryKeyValueStore<T> implements KeyValueStore<T> {
+export type AsyncKeyValueStore<T> = {
+  [K in keyof SyncKeyValueStore<T>]: SyncKeyValueStore<T>[K] extends (
+    ...args: infer Args
+  ) => infer R
+    ? (...args: Args) => Promise<R>
+    : never;
+};
+
+/**
+ * @deprecated do not use it's just for experimentation
+ */
+export type CustomSyncKeyValueStore<
+  T,
+  MethodsMapping extends Partial<{
+    [K in keyof SyncKeyValueStore<T>]: "sync" | "async" | "both";
+  }> = {}
+> = {
+  [K in keyof SyncKeyValueStore<T>]: SyncKeyValueStore<T>[K] extends (
+    ...args: infer Args
+  ) => infer R
+    ? MethodsMapping[K] extends "both"
+      ? (...args: Args) => Promise<R> | R
+      : MethodsMapping[K] extends "async"
+      ? (...args: Args) => Promise<R>
+      : (...args: Args) => R
+    : never;
+};
+
+export type KeyValueStore<T> = SyncKeyValueStore<T> | AsyncKeyValueStore<T>;
+
+export class InMemoryKeyValueStore<T> implements SyncKeyValueStore<T> {
   private store: Map<string, T>;
 
   constructor() {
     this.store = new Map<string, T>();
   }
 
-  async get(key: string): Promise<T | undefined> {
+  get(key: string): T | undefined {
     return this.store.get(key);
   }
 
-  async set(key: string, value: T) {
+  set(key: string, value: T) {
     this.store.set(key, value);
   }
 
-  async update(key: string, updater: (value: T | undefined) => T) {
+  update(key: string, updater: (value: T | undefined) => T) {
     const value = this.store.get(key);
     const newValue = updater(value);
     this.store.set(key, newValue);
   }
 
-  async delete(key: string) {
+  delete(key: string) {
     this.store.delete(key);
   }
 
-  async getMany(keys: string[]) {
+  getMany(keys: string[]) {
     return keys.map((key) => this.store.get(key));
   }
 
-  async setMany(keyValuePairs: [string, T][]) {
+  setMany(keyValuePairs: [string, T][]) {
     keyValuePairs.forEach(([key, value]) => this.store.set(key, value));
   }
 
-  async updateMany(keyValuePairs: [string, (value: T | undefined) => T][]) {
+  updateMany(keyValuePairs: [string, (value: T | undefined) => T][]) {
     keyValuePairs.forEach(([key, updater]) => {
       const value = this.store.get(key);
       const newValue = updater(value);
@@ -54,20 +82,20 @@ export class InMemoryKeyValueStore<T> implements KeyValueStore<T> {
     });
   }
 
-  async deleteMany(keys: string[]) {
+  deleteMany(keys: string[]) {
     keys.forEach((key) => this.store.delete(key));
   }
 
-  async getAll() {
+  getAll() {
     return Array.from(this.store.values());
   }
 
-  async clear() {
+  clear() {
     this.store.clear();
   }
 }
 
-export class SessionStorageKeyValueStore<T> implements KeyValueStore<T> {
+export class SessionStorageKeyValueStore<T> implements SyncKeyValueStore<T> {
   private readonly storeName: string;
   private serializer: (value: T) => string;
   private deserializer: (value: string) => T;
@@ -93,35 +121,35 @@ export class SessionStorageKeyValueStore<T> implements KeyValueStore<T> {
     return value ? this.deserializer(value) : undefined;
   }
 
-  async get(key: string) {
+  get(key: string) {
     return this._getValue(this._getKey(key));
   }
 
-  async set(key: string, value: T) {
+  set(key: string, value: T) {
     sessionStorage.setItem(this._getKey(key), this.serializer(value));
   }
 
-  async update(key: string, updater: (value: T | undefined) => T) {
+  update(key: string, updater: (value: T | undefined) => T) {
     const value = this._getValue(this._getKey(key));
     const newValue = updater(value);
     sessionStorage.setItem(this._getKey(key), this.serializer(newValue));
   }
 
-  async delete(key: string) {
+  delete(key: string) {
     sessionStorage.removeItem(this._getKey(key));
   }
 
-  async getMany(keys: string[]) {
+  getMany(keys: string[]) {
     return keys.map((key) => this._getValue(this._getKey(key)));
   }
 
-  async setMany(keyValuePairs: [string, T][]) {
+  setMany(keyValuePairs: [string, T][]) {
     keyValuePairs.forEach(([key, value]) => {
       sessionStorage.setItem(this._getKey(key), this.serializer(value));
     });
   }
 
-  async updateMany(keyValuePairs: [string, (value: T | undefined) => T][]) {
+  updateMany(keyValuePairs: [string, (value: T | undefined) => T][]) {
     keyValuePairs.forEach(([key, updater]) => {
       const value = this._getValue(this._getKey(key));
       const newValue = updater(value);
@@ -129,10 +157,10 @@ export class SessionStorageKeyValueStore<T> implements KeyValueStore<T> {
     });
   }
 
-  async deleteMany(keys: string[]) {
+  deleteMany(keys: string[]) {
     keys.forEach((key) => sessionStorage.removeItem(this._getKey(key)));
   }
-  async getAll() {
+  getAll() {
     const allValues: T[] = [];
     for (let i = 0; i < sessionStorage.length; i++) {
       const key = sessionStorage.key(i);
@@ -144,7 +172,7 @@ export class SessionStorageKeyValueStore<T> implements KeyValueStore<T> {
     return allValues;
   }
 
-  async clear() {
+  clear() {
     for (let i = sessionStorage.length - 1; i >= 0; i--) {
       const key = sessionStorage.key(i);
       if (key && key.startsWith(this.storeName)) {
@@ -154,7 +182,7 @@ export class SessionStorageKeyValueStore<T> implements KeyValueStore<T> {
   }
 }
 
-export class IDBKeyValueStore<T> implements KeyValueStore<T> {
+export class IDBKeyValueStore<T> implements AsyncKeyValueStore<T> {
   private readonly dbName: string;
   private readonly storeName: string;
   private ready: Promise<void>;

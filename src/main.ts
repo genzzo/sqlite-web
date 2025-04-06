@@ -108,8 +108,8 @@ const s = createSharedService({
   },
 });
 
-console.log("AAAAAAAAAA");
-s.add(randomInt(), randomInt());
+const res = s.slowAdd(randomInt(), randomInt());
+console.log("Result from slow add:", await res);
 // s.service.subtract(randomInt(), randomInt());
 // s.service.multiply(randomInt(), randomInt());
 
@@ -144,12 +144,12 @@ const workerApi = createWorkerClient<{
   setNumber: (value: number) => void;
 }>(worker);
 
-async function updateNumber() {
-  let number = await workerApi.getNumber();
-  console.log("Number from worker:", number);
-  await workerApi.setNumber(randomInt());
-  number = await workerApi.getNumber();
-  console.log("Number from worker after set:", number);
-}
+// async function updateNumber() {
+//   let number = await workerApi.getNumber();
+//   console.log("Number from worker:", number);
+//   await workerApi.setNumber(randomInt());
+//   number = await workerApi.getNumber();
+//   console.log("Number from worker after set:", number);
+// }
 
-updateNumber();
+// updateNumber();

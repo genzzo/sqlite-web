@@ -174,7 +174,8 @@ class SharedService<T extends object> {
   private isConsumer: boolean;
   private producerChannel: BroadcastChannel | null;
   private readonly onConsumerChange?: OnConsumerChange;
-  private readonly requestsInFlight: Map<string, InFlightRequest<T>>;
+  private readonly producedRequestsInFlight: Map<string, InFlightRequest<T>>;
+  private readonly consumedRequestsInProcess: Set<string>;
   private readonly consumerInFlightRequestsStore: KeyValueStore<
     Omit<InFlightRequest<T>, "resolve" | "reject"> & {
       nonce: string;
@@ -182,6 +183,8 @@ class SharedService<T extends object> {
   >;
   private readonly registeredProducers: Set<string>;
   private readonly logger: Logger;
+  ready: Promise<void>;
+  private readyResolve: (() => void) | null;
 
   constructor(options: SharedServiceOptions<T>) {
     this.serviceName = options.serviceName;
@@ -202,6 +205,8 @@ class SharedService<T extends object> {
         }
 
         return async (...args: unknown[]) => {
+          await this.ready;
+
           if (this.isConsumer) {
             this.logger.debug(
               `Consumer invoking method ${String(property)} with args`,
@@ -243,7 +248,7 @@ class SharedService<T extends object> {
                 args,
               },
             });
-            this.requestsInFlight.set(nonce, {
+            this.producedRequestsInFlight.set(nonce, {
               method: typedProperty,
               args,
               resolve,
@@ -258,7 +263,8 @@ class SharedService<T extends object> {
     );
     this.isConsumer = false;
     this.producerChannel = null;
-    this.requestsInFlight = new Map();
+    this.producedRequestsInFlight = new Map();
+    this.consumedRequestsInProcess = new Set();
     this.registeredProducers = new Set();
     this.onConsumerChange = options.onConsumerChange;
     this.consumerInFlightRequestsStore = new IDBKeyValueStore<
@@ -278,6 +284,10 @@ class SharedService<T extends object> {
         `shared-service:${this.serviceName}`,
         options.logLevel ?? "info"
       );
+    this.readyResolve = null;
+    this.ready = new Promise((resolve) => {
+      this.readyResolve = resolve;
+    });
 
     this._register();
 
@@ -361,6 +371,14 @@ class SharedService<T extends object> {
             if (event.data.type === "response") return;
             const { nonce, method, args } = event.data.payload;
 
+            if (this.consumedRequestsInProcess.has(nonce)) {
+              this.logger.warn(
+                `Request with nonce ${nonce} already in process, ignoring`
+              );
+              return;
+            }
+            this.consumedRequestsInProcess.add(nonce);
+
             this.logger.info(
               `Received request with nonce ${nonce} for method ${String(
                 method
@@ -384,6 +402,8 @@ class SharedService<T extends object> {
                 `Error occurred while invoking method ${String(method)}: ${e}`
               );
               error = e;
+            } finally {
+              this.consumedRequestsInProcess.delete(nonce);
             }
 
             this.logger.debug(
@@ -419,45 +439,68 @@ class SharedService<T extends object> {
 
     await this.onConsumerChange?.(this.isConsumer);
 
-    if (this.requestsInFlight.size > 0) {
-      for (const [nonce, { method, args, resolve, reject }] of this
-        .requestsInFlight) {
-        try {
-          const requestMethodValue = this.serviceProxy[method];
-          if (typeof requestMethodValue !== "function") {
-            throw new Error(`Method ${String(method)} is not a function`);
-          }
-          const result = await requestMethodValue(...args);
-          resolve(result);
-        } catch (error) {
-          reject(error);
-        } finally {
-          this.requestsInFlight.delete(nonce);
-        }
-      }
-    }
+    this.readyResolve?.();
+
+    const previousConsumerRequestsInFlightNonces = new Set();
 
     const previousConsumerRequestsInFlight =
       await this.consumerInFlightRequestsStore.getAll();
 
-    await Promise.allSettled(
-      previousConsumerRequestsInFlight.map(async ({ nonce, method, args }) => {
-        try {
-          const requestMethodValue = this.serviceProxy[method];
-          if (typeof requestMethodValue !== "function") {
-            throw new Error(`Method ${String(method)} is not a function`);
+    if (previousConsumerRequestsInFlight.length > 0) {
+      await Promise.allSettled(
+        previousConsumerRequestsInFlight.map(
+          async ({ nonce, method, args }) => {
+            previousConsumerRequestsInFlightNonces.add(nonce);
+            try {
+              const requestMethodValue = this.serviceProxy[method];
+              if (typeof requestMethodValue !== "function") {
+                throw new Error(`Method ${String(method)} is not a function`);
+              }
+              await requestMethodValue(...args);
+              this.consumerInFlightRequestsStore.delete(nonce);
+            } catch (error) {
+              this.logger.error(
+                `Error occurred while invoking method ${String(
+                  method
+                )}: ${error}`
+              );
+            } finally {
+              this.consumerInFlightRequestsStore.delete(nonce);
+            }
           }
-          await requestMethodValue(...args);
-          this.consumerInFlightRequestsStore.delete(nonce);
-        } catch (error) {
-          this.logger.error(
-            `Error occurred while invoking method ${String(method)}: ${error}`
-          );
-        } finally {
-          this.consumerInFlightRequestsStore.delete(nonce);
-        }
-      })
-    );
+        )
+      );
+    }
+
+    if (this.producedRequestsInFlight.size > 0) {
+      await Promise.allSettled(
+        Array.from(this.producedRequestsInFlight).map(
+          async ([nonce, { method, args, resolve, reject }]) => {
+            if (previousConsumerRequestsInFlightNonces.has(nonce)) {
+              this.logger.info(
+                `Request with nonce ${nonce} already processed using the consumer in-flight store, ignoring`
+              );
+              return;
+            }
+
+            const responseListener = this._createResponseListener(
+              nonce,
+              resolve,
+              reject
+            );
+            this.producerChannel?.addEventListener("message", responseListener);
+            this.producerChannel?.postMessage({
+              type: "request",
+              payload: {
+                nonce,
+                method,
+                args,
+              },
+            });
+          }
+        )
+      );
+    }
   }
 
   private async _onBecomeProducer() {
@@ -490,6 +533,7 @@ class SharedService<T extends object> {
         });
       });
       await this.onConsumerChange?.(this.isConsumer);
+      this.readyResolve?.();
     };
 
     this.sharedChannel.addEventListener(
@@ -503,9 +547,9 @@ class SharedService<T extends object> {
           await this.onConsumerChange?.(this.isConsumer);
           await register();
 
-          if (this.requestsInFlight.size > 0) {
+          if (this.producedRequestsInFlight.size > 0) {
             for (const [nonce, { method, args, resolve, reject }] of this
-              .requestsInFlight) {
+              .producedRequestsInFlight) {
               const responseListener = this._createResponseListener(
                 nonce,
                 resolve,
@@ -553,7 +597,7 @@ class SharedService<T extends object> {
         resolve(result);
       }
 
-      this.requestsInFlight.delete(nonce);
+      this.producedRequestsInFlight.delete(nonce);
       this.producerChannel?.removeEventListener("message", listener);
     };
 

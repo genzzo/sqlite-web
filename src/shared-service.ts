@@ -14,7 +14,7 @@ type SharedServiceOptions<T extends object> = {
   service: T;
   onConsumerChange?: OnConsumerChange;
   logger?: Logger;
-  logLevel?: "debug" | "info" | "warn" | "error";
+  logLevel?: "debug" | "info" | "warn" | "error" | "none";
 };
 
 type InFlightRequest<T extends object, K extends keyof T = keyof T> = {

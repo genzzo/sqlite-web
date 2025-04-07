@@ -13,6 +13,10 @@ type CreateSharedServiceProviderOptions<T extends object> = {
   onReady: () => void | Promise<void>;
 };
 
+type CreateSharedServiceClientOptions<T extends object> = {
+  sharedChannelName: string;
+};
+
 type SharedServiceProxy<T extends object> = {
   [K in keyof T]: T[K] extends (...args: infer A) => infer R
     ? (...args: A) => Promise<R>
@@ -136,7 +140,9 @@ class SharedService<T extends object> {
     );
 
     if (sharedServiceLockExists) {
-      this.serviceNode = new SharedServiceClient<T>();
+      this.serviceNode = new SharedServiceClient<T>({
+        sharedChannelName: this.serviceChannelName,
+      });
     }
 
     createInfinitelyOpenLock(this.serviceLockName, () => {
@@ -185,14 +191,14 @@ class SharedServiceProvider<T extends object> {
     this.serviceName = options.serviceName;
     this.service = options.service;
     this.sharedChannel = new BroadcastChannel(options.sharedChannelName);
+    this._init();
   }
 
   private _init() {
     this.sharedChannel.addEventListener("message", (e) => {
       const { type, payload } = e.data;
       if (type !== "client-registration") return;
-
-      const { messagePort } = payload;
+      console.log(payload, e.ports);
     });
   }
 
@@ -202,7 +208,32 @@ class SharedServiceProvider<T extends object> {
 }
 
 class SharedServiceClient<T extends object> {
+  private readonly sharedChannel: BroadcastChannel;
+  private readonly providerMessagePort: MessagePort;
+
+  constructor(options: CreateSharedServiceClientOptions<T>) {
+    this.sharedChannel = new BroadcastChannel(options.sharedChannelName);
+
+    const { port1: clientMessagePort, port2: providerMessagePort } =
+      new MessageChannel();
+
+    this.sharedChannel.postMessage({
+      type: "client-registration",
+      payload: {
+        clientMessagePort: () => {},
+      },
+    });
+
+    this.providerMessagePort = providerMessagePort;
+  }
+
   callServiceMethod(method: T[keyof T] & Function, args: unknown[]) {
     return method(...args);
   }
+}
+
+export function createNewSharedService<T extends object>(
+  options: CreateSharedServiceOptions<T>
+) {
+  return new SharedService(options);
 }

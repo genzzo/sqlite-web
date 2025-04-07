@@ -1,6 +1,7 @@
 import "./style.css";
 import { createSharedService } from "./shared-service.ts";
 import { createWorkerClient } from "./utils.ts";
+import { createNewSharedService } from "./shared-service-2.ts";
 
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <div>
@@ -99,6 +100,11 @@ const mockService = {
   },
 };
 
+const sharedServiceNew = createNewSharedService({
+  serviceName: "NEWNEWNEDDW",
+  service: mockService,
+});
+
 const s = createSharedService({
   serviceName: "counter",
   service: mockService,
@@ -106,6 +112,7 @@ const s = createSharedService({
     // await new Promise((r) => setTimeout(r, randomInt() * 5));
     logElement.style.display = isConsumer ? "block" : "none";
   },
+  logLevel: "none",
 });
 
 const res = s.slowAdd(randomInt(), randomInt());

@@ -9,6 +9,8 @@ type CreateSharedServiceOptions<T extends object> = {
 type CreateSharedServiceProviderOptions<T extends object> = {
   serviceName: string;
   service: T;
+  sharedChannelName: string;
+  onReady: () => void | Promise<void>;
 };
 
 type SharedServiceProxy<T extends object> = {
@@ -48,23 +50,23 @@ function validateProxyProperty<T extends object>(
   }
 }
 
-class ManualPromise<T> {
+class ManualPromise<T, E = unknown> {
   private _internalPromise: Promise<T>;
-  private internalResolve: (value: T) => void;
-  private internalReject: (reason?: unknown) => void;
+  private _internalResolve: (value: T) => void;
+  private _internalReject: (reason?: E) => void;
 
   constructor() {
-    this.internalResolve = this.noop;
-    this.internalReject = this.noop;
+    this._internalResolve = this._noop;
+    this._internalReject = this._noop;
 
     this._internalPromise = new Promise<T>((promiseResolve, promiseReject) => {
-      this.internalResolve = (value) => {
+      this._internalResolve = (value) => {
         promiseResolve(value);
-        this.resetCallbacks();
+        this._resetCallbacks();
       };
-      this.internalReject = (reason) => {
+      this._internalReject = (reason) => {
         promiseReject(reason);
-        this.resetCallbacks();
+        this._resetCallbacks();
       };
     });
   }
@@ -74,40 +76,39 @@ class ManualPromise<T> {
   }
 
   resolve(value: T) {
-    this.internalResolve(value);
+    this._internalResolve(value);
   }
 
-  reject(reason?: unknown) {
-    this.internalReject(reason);
+  reject(reason?: E) {
+    this._internalReject(reason);
   }
 
   reset() {
-    this.resetCallbacks();
+    this._resetCallbacks();
     this._internalPromise = new Promise<T>((promiseResolve, promiseReject) => {
-      this.internalResolve = (value) => {
+      this._internalResolve = (value) => {
         promiseResolve(value);
-        this.resetCallbacks();
+        this._resetCallbacks();
       };
-      this.internalReject = (reason) => {
+      this._internalReject = (reason) => {
         promiseReject(reason);
-        this.resetCallbacks();
+        this._resetCallbacks();
       };
     });
   }
 
-  private resetCallbacks() {
-    this.internalResolve = this.noop;
-    this.internalReject = this.noop;
+  private _resetCallbacks() {
+    this._internalResolve = this._noop;
+    this._internalReject = this._noop;
   }
 
-  private noop = () => {};
+  private _noop = (..._args: unknown[]) => {};
 }
 
 class SharedService<T extends object> {
   private readonly serviceName: string;
   private readonly service: T;
   readonly serviceProxy: SharedServiceProxy<T>;
-  private readonly providerClientId: ManualPromise<string>;
   readonly ready: ManualPromise<void>;
   private serviceNode?: SharedServiceProvider<T> | SharedServiceClient<T>;
 
@@ -115,24 +116,26 @@ class SharedService<T extends object> {
     this.serviceName = options.serviceName;
     this.service = options.service;
     this.serviceProxy = this._createProxy();
-    this.providerClientId = new ManualPromise<string>();
     this.ready = new ManualPromise<void>();
 
-    this._register();
+    this._registerNode();
   }
 
   private get serviceLockName() {
     return `shared-service:${this.serviceName}`;
   }
 
-  private async _register() {
+  private get serviceChannelName() {
+    return `shared-service:${this.serviceName}`;
+  }
+
+  private async _registerNode() {
     const locks = await navigator.locks.query();
     const sharedServiceLockExists = locks.held?.some(
       (lock) => lock.name === this.serviceLockName
     );
 
     if (sharedServiceLockExists) {
-      const providerClientId = await this.providerClientId.promise;
       this.serviceNode = new SharedServiceClient<T>();
     }
 
@@ -140,6 +143,10 @@ class SharedService<T extends object> {
       this.serviceNode = new SharedServiceProvider<T>({
         serviceName: this.serviceName,
         service: this.service,
+        sharedChannelName: this.serviceChannelName,
+        onReady: () => {
+          this.ready.resolve();
+        },
       });
     });
   }
@@ -171,11 +178,22 @@ class SharedService<T extends object> {
 
 class SharedServiceProvider<T extends object> {
   private readonly serviceName: string;
+  private readonly sharedChannel: BroadcastChannel;
   private readonly service: T;
 
   constructor(options: CreateSharedServiceProviderOptions<T>) {
     this.serviceName = options.serviceName;
     this.service = options.service;
+    this.sharedChannel = new BroadcastChannel(options.sharedChannelName);
+  }
+
+  private _init() {
+    this.sharedChannel.addEventListener("message", (e) => {
+      const { type, payload } = e.data;
+      if (type !== "client-registration") return;
+
+      const { messagePort } = payload;
+    });
   }
 
   callServiceMethod(method: T[keyof T] & Function, args: unknown[]) {
@@ -184,29 +202,6 @@ class SharedServiceProvider<T extends object> {
 }
 
 class SharedServiceClient<T extends object> {
-  private readonly providerClientId: string;
-
-  constructor() {
-    this.providerClientId = "temp...";
-  }
-
-  async _createProviderMessageChannel() {
-    const channel = new MessageChannel();
-    const providerClientId = this.providerClientId;
-
-    channel.port1.onmessage = async (event) => {
-      const { result, error } = event.data;
-
-      if (error !== undefined) {
-        throw error;
-      }
-
-      return result;
-    };
-
-    return channel;
-  }
-
   callServiceMethod(method: T[keyof T] & Function, args: unknown[]) {
     return method(...args);
   }

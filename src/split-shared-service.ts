@@ -1,757 +1,591 @@
-// import { IDBKeyValueStore, KeyValueStore } from "./kv-stores";
-
-// type OnConsumerChange = (isConsumer: boolean) => void | Promise<void>;
-
-// type Logger = {
-//   debug: (...args: unknown[]) => void;
-//   info: (...args: unknown[]) => void;
-//   warn: (...args: unknown[]) => void;
-//   error: (...args: unknown[]) => void;
-// };
-
-// type SharedServiceOptions<T extends object> = {
-//   serviceName: string;
-//   service: T;
-//   onConsumerChange?: OnConsumerChange;
-//   logger?: Logger;
-//   logLevel?: "debug" | "info" | "warn" | "error";
-// };
-
-// type InFlightRequest<T extends object, K extends keyof T = keyof T> = {
-//   method: K;
-//   args: unknown[];
-//   resolve: (value: unknown) => void;
-//   reject: (reason?: unknown) => void;
-// };
-
-// type RequestEventData<T extends object, K extends keyof T = keyof T> = {
-//   type: "request";
-//   payload: {
-//     nonce: string;
-//     method: K;
-//     args: unknown[];
-//   };
-// };
-
-// type ResponseEventData<T extends object, K extends keyof T = keyof T> = {
-//   type: "response";
-//   payload: {
-//     nonce: string;
-//     result: T[K];
-//     error: unknown;
-//   };
-// };
-
-// type ProducerRegistrationEventData = {
-//   type: "producer-registration";
-//   payload: {
-//     producerId: string;
-//   };
-// };
-
-// type ProducerRegisteredEventData = {
-//   type: "producer-registered";
-//   payload: {
-//     producerId: string;
-//   };
-// };
-
-// type ConsumerChangeEventData = {
-//   type: "consumer-change";
-// };
-
-// type SharedChannelEventData =
-//   | ProducerRegistrationEventData
-//   | ProducerRegisteredEventData
-//   | ConsumerChangeEventData;
-
-// type ProducerChannelEventData<T extends object, K extends keyof T = keyof T> =
-//   | RequestEventData<T, K>
-//   | ResponseEventData<T, K>;
-
-// type SharedServiceProxy<T extends object> = {
-//   [K in keyof T]: T[K] extends (...args: infer A) => infer R
-//     ? (...args: A) => Promise<R>
-//     : T[K];
-// };
-
-// function generateId() {
-//   return crypto.randomUUID();
-// }
-
-// async function retry<T>(
-//   fn: () => T | Promise<T>,
-//   options: {
-//     retries: number;
-//     delay: number | ((attempt: number) => number);
-//   } = {
-//     retries: 3,
-//     delay: (attempt: number) => Math.pow(2, attempt) * 250,
-//   }
-// ) {
-//   const { retries, delay } = options;
-//   if (retries < 0) {
-//     throw new Error("Retries must be greater than or equal to 0");
-//   }
-//   if (typeof delay !== "number" && typeof delay !== "function") {
-//     throw new Error("Delay must be a number or a function");
-//   }
-
-//   let attempt = 0;
-
-//   while (attempt <= retries) {
-//     try {
-//       return await fn();
-//     } catch (error) {
-//       attempt++;
-//       if (attempt > retries) {
-//         throw new Error(
-//           `Function failed after ${retries + 1} attempts. Error: ${error}`
-//         );
-//       }
-//       const currentDelay = typeof delay === "function" ? delay(attempt) : delay;
-//       await new Promise((res) => setTimeout(res, currentDelay));
-//     }
-//   }
-// }
-
-// /**
-//  * Creates an exclusive {@link https://developer.mozilla.org/en-US/docs/Web/API/Lock Web Lock} with an unresolved promise.
-//  * This lock will never be released until the context is destroyed. This is useful for tracking the lifetime of the context and implementing a context queue.
-//  */
-// function createInfinitelyOpenLock(
-//   name: string,
-//   callback?: (lock: Lock | null) => void | Promise<void>
-// ) {
-//   navigator.locks.request(name, { mode: "exclusive" }, async (lock) => {
-//     if (callback !== undefined) {
-//       await callback(lock);
-//     }
-//     await new Promise(() => {});
-//   });
-// }
-
-// function createLogger(
-//   serviceName: string,
-//   logLevel: "none" | "debug" | "info" | "warn" | "error"
-// ) {
-//   const logLevelMap = {
-//     none: 0,
-//     error: 1,
-//     warn: 2,
-//     info: 3,
-//     debug: 4,
-//   };
-
-//   return {
-//     debug: (...args: unknown[]) => {
-//       if (logLevelMap[logLevel] >= logLevelMap.debug) {
-//         console.debug(`[${serviceName}]`, ...args);
-//       }
-//     },
-//     info: (...args: unknown[]) => {
-//       if (logLevelMap[logLevel] >= logLevelMap.info) {
-//         console.info(`[${serviceName}]`, ...args);
-//       }
-//     },
-//     warn: (...args: unknown[]) => {
-//       if (logLevelMap[logLevel] >= logLevelMap.warn) {
-//         console.warn(`[${serviceName}]`, ...args);
-//       }
-//     },
-//     error: (...args: unknown[]) => {
-//       if (logLevelMap[logLevel] >= logLevelMap.error) {
-//         console.error(`[${serviceName}]`, ...args);
-//       }
-//     },
-//   };
-// }
-
-// class SharedService<T extends object> {
-//   readonly serviceProxy: SharedServiceProxy<T>;
-//   private readonly serviceName: string;
-//   private readonly sharedChannel: BroadcastChannel;
-//   private isConsumer: boolean;
-//   private producerChannel: BroadcastChannel | null;
-//   private readonly onConsumerChange?: OnConsumerChange;
-//   private readonly producedRequestsInFlight: Map<string, InFlightRequest<T>>;
-//   private readonly consumedRequestsInProcess: Set<string>;
-//   private readonly consumerInFlightRequestsStore: KeyValueStore<
-//     Omit<InFlightRequest<T>, "resolve" | "reject"> & {
-//       nonce: string;
-//     }
-//   >;
-//   private readonly registeredProducers: Set<string>;
-//   private readonly logger: Logger;
-//   ready: Promise<void>;
-//   private readyResolve: (() => void) | null;
-
-//   constructor(options: SharedServiceOptions<T>) {
-//     this.serviceName = options.serviceName;
-//     this.serviceProxy = new Proxy(options.service, {
-//       get: (target, property) => {
-//         if (typeof property === "symbol") return undefined;
-
-//         const typedProperty = property as keyof T;
-//         const typedPropertyValue = target[typedProperty];
-
-//         if (typeof typedPropertyValue !== "function") {
-//           this.logger.debug(
-//             `Property ${String(
-//               property
-//             )} is not a function, returning the property value`
-//           );
-//           return typedPropertyValue;
-//         }
-
-//         return async (...args: unknown[]) => {
-//           await this.ready;
-
-//           if (this.isConsumer) {
-//             this.logger.debug(
-//               `Consumer invoking method ${String(property)} with args`,
-//               args
-//             );
-
-//             const nonce = generateId();
-//             await this.consumerInFlightRequestsStore.set(nonce, {
-//               nonce,
-//               method: typedProperty,
-//               args,
-//             });
-
-//             const returnValue = await typedPropertyValue(...args);
-//             this.consumerInFlightRequestsStore.delete(nonce);
-//             return returnValue;
-//           }
-
-//           this.logger.debug(
-//             `Producer invoking method ${String(
-//               property
-//             )} with args, sending request to consumer`,
-//             args
-//           );
-
-//           return new Promise((resolve, reject) => {
-//             const nonce = generateId();
-//             const responseListener = this._createResponseListener(
-//               nonce,
-//               resolve,
-//               reject
-//             );
-//             this.producerChannel?.addEventListener("message", responseListener);
-//             this.producerChannel?.postMessage({
-//               type: "request",
-//               payload: {
-//                 nonce,
-//                 method: property,
-//                 args,
-//               },
-//             });
-//             this.producedRequestsInFlight.set(nonce, {
-//               method: typedProperty,
-//               args,
-//               resolve,
-//               reject,
-//             });
-//           });
-//         };
-//       },
-//     }) as SharedServiceProxy<T>;
-//     this.sharedChannel = new BroadcastChannel(
-//       `shared-service:${this.serviceName}`
-//     );
-//     this.isConsumer = false;
-//     this.producerChannel = null;
-//     this.producedRequestsInFlight = new Map();
-//     this.consumedRequestsInProcess = new Set();
-//     this.registeredProducers = new Set();
-//     this.onConsumerChange = options.onConsumerChange;
-//     this.consumerInFlightRequestsStore = new IDBKeyValueStore<
-//       Omit<
-//         InFlightRequest<T> & {
-//           nonce: string;
-//         },
-//         "resolve" | "reject"
-//       >
-//     >(
-//       `shared-service-consumer-requests-in-flight-ABC:${this.serviceName}`,
-//       `shared-service-consumer-requests-in-flight-ABC:${this.serviceName}`
-//     );
-//     this.logger =
-//       options.logger ??
-//       createLogger(
-//         `shared-service:${this.serviceName}`,
-//         options.logLevel ?? "info"
-//       );
-//     this.readyResolve = null;
-//     this.ready = new Promise((resolve) => {
-//       this.readyResolve = resolve;
-//     });
-
-//     this._register();
-
-//     // if querying of the lock returns false for two contexts, then only one will be capture the lock and the other will never be connected to the service
-//     // so here we retry again shortly after the first attempt, to ensure that we account for race conditions when multiple contexts are trying to register at once
-//     setTimeout(() => {
-//       if (!this.isConsumer && !this.producerChannel) {
-//         this.logger.info(
-//           "Service did not register as a producer nor as a consumer, retrying..."
-//         );
-//         retry(async () => {
-//           await this._register();
-//           if (!this.isConsumer && !this.producerChannel) {
-//             throw new Error(
-//               "Service did not register as a producer nor as a consumer"
-//             );
-//           }
-//         });
-//       }
-//     }, 200);
-//   }
-
-//   private async _register() {
-//     const locks = await navigator.locks.query();
-//     const sharedServiceLockExists = locks.held?.some(
-//       (lock) => lock.name === `shared-service:${this.serviceName}`
-//     );
-
-//     if (sharedServiceLockExists) {
-//       this.logger.info("Consumer exists, becoming producer...");
-//       this._onBecomeProducer();
-//     }
-//     createInfinitelyOpenLock(`shared-service:${this.serviceName}`, async () => {
-//       this.logger.info("Consumer does not exist, becoming consumer...");
-//       await this._onBecomeConsumer();
-//     });
-//   }
-// }
-
-// //!!!!!!!!!!!!!!!!!!!!!!!!
-// //!!!!!!!!!!!!!!!!!!!!!!!!
-// //!!!!!!!!!!!!!!!!!!!!!!!!
-// //!!!!!!!!!!!!!!!!!!!!!!!!
-// //!!!!!!!!!!!!!!!!!!!!!!!!
-// //!!!!!!!!!!!!!!!!!!!!!!!!
-// //!!!!!!!!!!!!!!!!!!!!!!!!
-// //!!!!!!!!!!!!!!!!!!!!!!!!
-
-// class SharedServiceConsumer<T extends object> {
-//   serviceProxy: SharedServiceProxy<T>;
-//   private readonly serviceName: string;
-//   private readonly sharedChannel: BroadcastChannel;
-//   private readonly registeredProducers: Set<string>;
-//   private readonly consumedRequestsInProcess: Set<string>;
-//   private readonly consumerInFlightRequestsStore: KeyValueStore<
-//     Omit<InFlightRequest<T>, "resolve" | "reject"> & {
-//       nonce: string;
-//     }
-//   >;
-//   private readonly logger: Logger;
-
-//   constructor(options: SharedServiceOptions<T>) {
-//     this.serviceName = options.serviceName;
-//     this.serviceProxy = this._getServiceProxy(options.service);
-//     this.sharedChannel = new BroadcastChannel(
-//       `shared-service:${this.serviceName}`
-//     );
-//     this.registeredProducers = new Set();
-//     this.consumerInFlightRequestsStore = new IDBKeyValueStore<
-//       Omit<
-//         InFlightRequest<T> & {
-//           nonce: string;
-//         },
-//         "resolve" | "reject"
-//       >
-//     >(
-//       `shared-service-consumer-requests-in-flight-ABC:${this.serviceName}`,
-//       `shared-service-consumer-requests-in-flight-ABC:${this.serviceName}`
-//     );
-//     this.logger =
-//       options.logger ??
-//       createLogger(
-//         `shared-service:${this.serviceName}`,
-//         options.logLevel ?? "info"
-//       );
-
-//     this._init();
-//   }
-
-//   private async _init() {
-//     // listen to newly registered consumers
-//     this.sharedChannel.addEventListener(
-//       "message",
-//       async (event: MessageEvent<ProducerRegistrationEventData>) => {
-//         const { type, payload } = event.data;
-//         if (type !== "producer-registration") return;
-
-//         const { producerId } = payload;
-
-//         if (this.registeredProducers.has(producerId)) {
-//           this.logger.error(
-//             `Producer with id ${producerId} already registered`
-//           );
-//           return;
-//         }
-
-//         this.logger.info(
-//           `Producer with id ${producerId} is registering, creating channel...`
-//         );
-
-//         const producerChannel = new BroadcastChannel(
-//           `shared-service-producer:${this.serviceName}-${producerId}`
-//         );
-//         navigator.locks.request(
-//           `shared-service-producer:${this.serviceName}-${producerId}`,
-//           { mode: "exclusive" },
-//           () => {
-//             this.logger.info(
-//               `Producer with id ${producerId} has disconnected, cleaning up`
-//             );
-//             this.registeredProducers.delete(producerId);
-//             producerChannel.close();
-//           }
-//         );
-
-//         producerChannel.addEventListener(
-//           "message",
-//           async (event: MessageEvent<ProducerChannelEventData<T>>) => {
-//             if (event.data.type === "response") return;
-//             const { nonce, method, args } = event.data.payload;
-
-//             if (this.consumedRequestsInProcess.has(nonce)) {
-//               this.logger.warn(
-//                 `Request with nonce ${nonce} already in process, ignoring`
-//               );
-//               return;
-//             }
-//             this.consumedRequestsInProcess.add(nonce);
-
-//             this.logger.info(
-//               `Received request with nonce ${nonce} for method ${String(
-//                 method
-//               )} with args`,
-//               args
-//             );
-
-//             let result: unknown = null;
-//             let error: unknown = null;
-//             try {
-//               if (typeof this.serviceProxy[method] !== "function") {
-//                 throw new Error(
-//                   `Expected to receive a function, but received ${String(
-//                     method
-//                   )}`
-//                 );
-//               }
-//               result = await this.serviceProxy[method](...args);
-//             } catch (e) {
-//               this.logger.error(
-//                 `Error occurred while invoking method ${String(method)}: ${e}`
-//               );
-//               error = e;
-//             } finally {
-//               this.consumedRequestsInProcess.delete(nonce);
-//             }
-
-//             this.logger.debug(
-//               `Sending response with nonce ${nonce} for method ${String(
-//                 method
-//               )} with result`,
-//               result
-//             );
-
-//             producerChannel.postMessage({
-//               type: "response",
-//               payload: {
-//                 nonce,
-//                 result,
-//                 error,
-//               },
-//             });
-//           }
-//         );
-
-//         this.registeredProducers.add(producerId);
-
-//         this.logger.info(`Producer with id ${producerId} registered`);
-
-//         this.sharedChannel.postMessage({
-//           type: "producer-registered",
-//           payload: { producerId },
-//         });
-//       }
-//     );
-
-//     this.sharedChannel.postMessage({ type: "consumer-change" });
-
-//     await this.onConsumerChange?.(this.isConsumer);
-
-//     this.readyResolve?.();
-
-//     const previousConsumerRequestsInFlightNonces = new Set();
-
-//     const previousConsumerRequestsInFlight =
-//       await this.consumerInFlightRequestsStore.getAll();
-
-//     if (previousConsumerRequestsInFlight.length > 0) {
-//       await Promise.allSettled(
-//         previousConsumerRequestsInFlight.map(
-//           async ({ nonce, method, args }) => {
-//             previousConsumerRequestsInFlightNonces.add(nonce);
-//             try {
-//               const requestMethodValue = this.serviceProxy[method];
-//               if (typeof requestMethodValue !== "function") {
-//                 throw new Error(`Method ${String(method)} is not a function`);
-//               }
-//               await requestMethodValue(...args);
-//               this.consumerInFlightRequestsStore.delete(nonce);
-//             } catch (error) {
-//               this.logger.error(
-//                 `Error occurred while invoking method ${String(
-//                   method
-//                 )}: ${error}`
-//               );
-//             } finally {
-//               this.consumerInFlightRequestsStore.delete(nonce);
-//             }
-//           }
-//         )
-//       );
-//     }
-//   }
-
-//   private _getServiceProxy(service: T) {
-//     return new Proxy(service, {
-//       get: (target, property) => {
-//         if (typeof property === "symbol") return undefined;
-
-//         const typedProperty = property as keyof T;
-//         const typedPropertyValue = target[typedProperty];
-
-//         if (typeof typedPropertyValue !== "function") {
-//           this.logger.debug(
-//             `Property ${String(
-//               property
-//             )} is not a function, returning the property value`
-//           );
-//           return typedPropertyValue;
-//         }
-
-//         return async (...args: unknown[]) => {
-//           this.logger.debug(
-//             `Consumer invoking method ${String(property)} with args`,
-//             args
-//           );
-
-//           const nonce = generateId();
-//           await this.consumerInFlightRequestsStore.set(nonce, {
-//             nonce,
-//             method: typedProperty,
-//             args,
-//           });
-
-//           const returnValue = await typedPropertyValue(...args);
-//           this.consumerInFlightRequestsStore.delete(nonce);
-//           return returnValue;
-//         };
-//       },
-//     }) as SharedServiceProxy<T>;
-//   }
-// }
-
-// //!!!!!!!!!!!!!!!!!!!!!!!!
-// //!!!!!!!!!!!!!!!!!!!!!!!!
-// //!!!!!!!!!!!!!!!!!!!!!!!!
-// //!!!!!!!!!!!!!!!!!!!!!!!!
-// //!!!!!!!!!!!!!!!!!!!!!!!!
-// //!!!!!!!!!!!!!!!!!!!!!!!!
-// //!!!!!!!!!!!!!!!!!!!!!!!!
-// //!!!!!!!!!!!!!!!!!!!!!!!!
-
-// class SharedServiceProducer<T extends object> {
-//   serviceProxy: SharedServiceProxy<T>;
-//   private readonly serviceName: string;
-//   private readonly sharedChannel: BroadcastChannel;
-//   private readonly producerChannel: BroadcastChannel;
-//   private readonly onConsumerChange?: OnConsumerChange;
-//   private readonly producedRequestsInFlight: Map<string, InFlightRequest<T>>;
-//   private readonly logger: Logger;
-
-//   constructor(options: SharedServiceOptions<T>) {
-//     this.serviceName = options.serviceName;
-//     this.serviceProxy = new Proxy(options.service, {
-//       get: (target, property) => {
-//         if (typeof property === "symbol") return undefined;
-
-//         const typedProperty = property as keyof T;
-//         const typedPropertyValue = target[typedProperty];
-
-//         if (typeof typedPropertyValue !== "function") {
-//           this.logger.debug(
-//             `Property ${String(
-//               property
-//             )} is not a function, returning the property value`
-//           );
-//           return typedPropertyValue;
-//         }
-
-//         return async (...args: unknown[]) => {
-//           this.logger.debug(
-//             `Producer invoking method ${String(
-//               property
-//             )} with args, sending request to consumer`,
-//             args
-//           );
-
-//           return new Promise((resolve, reject) => {
-//             const nonce = generateId();
-//             const responseListener = this._createResponseListener(
-//               nonce,
-//               resolve,
-//               reject
-//             );
-//             this.producerChannel?.addEventListener("message", responseListener);
-//             this.producerChannel?.postMessage({
-//               type: "request",
-//               payload: {
-//                 nonce,
-//                 method: property,
-//                 args,
-//               },
-//             });
-//             this.producedRequestsInFlight.set(nonce, {
-//               method: typedProperty,
-//               args,
-//               resolve,
-//               reject,
-//             });
-//           });
-//         };
-//       },
-//     }) as SharedServiceProxy<T>;
-//     this.sharedChannel = new BroadcastChannel(
-//       `shared-service:${this.serviceName}`
-//     );
-//     this.producerChannel = null;
-//     this.producedRequestsInFlight = new Map();
-//     this.consumedRequestsInProcess = new Set();
-//     this.registeredProducers = new Set();
-//     this.onConsumerChange = options.onConsumerChange;
-//     this.consumerInFlightRequestsStore = new IDBKeyValueStore<
-//       Omit<
-//         InFlightRequest<T> & {
-//           nonce: string;
-//         },
-//         "resolve" | "reject"
-//       >
-//     >(
-//       `shared-service-consumer-requests-in-flight-ABC:${this.serviceName}`,
-//       `shared-service-consumer-requests-in-flight-ABC:${this.serviceName}`
-//     );
-//     this.logger =
-//       options.logger ??
-//       createLogger(
-//         `shared-service:${this.serviceName}`,
-//         options.logLevel ?? "info"
-//       );
-//     this.producerChannel = new BroadcastChannel(
-//       `shared-service-producer:${this.serviceName}-${producerId}`
-//     );
-
-//     this._register();
-//   }
-
-//   private async _onBecomeProducer() {
-//     const producerId = generateId();
-
-//     const register = async () => {
-//       await new Promise<void>((resolve) => {
-//         const onRegisteredListener = (
-//           event: MessageEvent<SharedChannelEventData>
-//         ) => {
-//           if (
-//             event.data.type === "producer-registered" &&
-//             event.data.payload.producerId === producerId
-//           ) {
-//             this.sharedChannel.removeEventListener(
-//               "message",
-//               onRegisteredListener
-//             );
-//             resolve();
-//           }
-//         };
-//         this.sharedChannel.addEventListener("message", onRegisteredListener);
-//         this.sharedChannel.postMessage({
-//           type: "producer-registration",
-//           payload: { producerId },
-//         });
-//       });
-//       await this.onConsumerChange?.(this.isConsumer);
-//       this.readyResolve?.();
-//     };
-
-//     this.sharedChannel.addEventListener(
-//       "message",
-//       async (event: MessageEvent<SharedChannelEventData>) => {
-//         if (event.data.type === "consumer-change") {
-//           await this.onConsumerChange?.(this.isConsumer);
-//           await register();
-
-//           if (this.producedRequestsInFlight.size > 0) {
-//             for (const [nonce, { method, args, resolve, reject }] of this
-//               .producedRequestsInFlight) {
-//               const responseListener = this._createResponseListener(
-//                 nonce,
-//                 resolve,
-//                 reject
-//               );
-//               this.producerChannel?.addEventListener(
-//                 "message",
-//                 responseListener
-//               );
-//               this.producerChannel?.postMessage({
-//                 type: "request",
-//                 payload: {
-//                   nonce,
-//                   method,
-//                   args,
-//                 },
-//               });
-//             }
-//           }
-//         }
-//       }
-//     );
-
-//     // create a lock for the producer, so that when this lock is released, the consumer knows the provider is gone and can close the channel
-//     createInfinitelyOpenLock(
-//       `shared-service-producer:${this.serviceName}-${producerId}`,
-//       register
-//     );
-//   }
-
-//   private _createResponseListener(
-//     nonce: string,
-//     resolve: (value: unknown) => void,
-//     reject: (reason?: unknown) => void
-//   ) {
-//     const listener = (event: MessageEvent<ProducerChannelEventData<T>>) => {
-//       const { type, payload } = event.data;
-//       if (type === "request" || payload.nonce !== nonce) return;
-
-//       const { result, error } = payload;
-
-//       if (error) {
-//         reject(error);
-//       } else {
-//         resolve(result);
-//       }
-
-//       this.producedRequestsInFlight.delete(nonce);
-//       this.producerChannel?.removeEventListener("message", listener);
-//     };
-
-//     return listener;
-//   }
-// }
+import { KeyValueStore } from "./kv-stores";
+
+type OnConsumerChange = (isConsumer: boolean) => void | Promise<void>;
+
+type CreateSharedServiceOptions<T extends object> = {
+  serviceName: string;
+  service: T;
+  onConsumerChange?: OnConsumerChange;
+};
+
+type CreateSharedServiceProviderOptions<T> = {
+  serviceName: string;
+  service: T;
+  onReady: () => void | Promise<void>;
+};
+
+type CreateSharedServiceClientOptions<T extends object> = {
+  serviceName: string;
+};
+
+type InFlightRequest<T extends object, K extends keyof T = keyof T> = {
+  method: K;
+  args: unknown[];
+  resolve: (value: unknown) => void;
+  reject: (reason?: unknown) => void;
+};
+
+type SharedServiceProxy<T extends object> = {
+  [K in keyof T]: T[K] extends (...args: infer A) => infer R
+    ? (...args: A) => Promise<R>
+    : T[K];
+};
+
+type ClientRegistrationEventData = {
+  type: "client-registration";
+  payload: {
+    clientId: string;
+  };
+};
+
+type ClientRegisteredEventData = {
+  type: "client-registered";
+  payload: {
+    clientId: string;
+  };
+};
+
+type ProviderElectedEventData = {
+  type: "provider-elected";
+};
+
+type SharedChannelEventData =
+  | ClientRegistrationEventData
+  | ClientRegisteredEventData
+  | ProviderElectedEventData;
+
+type ClientPrivateRequestEventData<
+  T extends object,
+  K extends keyof T = keyof T
+> = {
+  type: "request";
+  payload: {
+    nonce: string;
+    methodKey: K;
+    method: T[keyof T] & Function;
+    args: unknown[];
+  };
+};
+
+type ClientPrivateResponseEventData<
+  T extends object,
+  K extends keyof T = keyof T
+> = {
+  type: "response";
+  payload: {
+    nonce: string;
+    result: T[K];
+    error: unknown;
+  };
+};
+
+type ClientPrivateEventData<T extends object, K extends keyof T = keyof T> =
+  | ClientPrivateRequestEventData<T, K>
+  | ClientPrivateResponseEventData<T, K>;
+
+/**
+ * Creates an exclusive {@link https://developer.mozilla.org/en-US/docs/Web/API/Lock Web Lock} with an unresolved promise.
+ * This lock will never be released until the context is destroyed. This is useful for tracking the lifetime of the context and implementing a context queue.
+ */
+function createInfinitelyOpenLock(
+  name: string,
+  callback?: (lock: Lock | null) => void | Promise<void>
+) {
+  navigator.locks.request(name, { mode: "exclusive" }, async (lock) => {
+    if (callback !== undefined) {
+      await callback(lock);
+    }
+    await new Promise(() => {});
+  });
+}
+
+function validateProxyProperty<T extends object>(
+  target: T,
+  property: PropertyKey
+): asserts property is keyof T {
+  if (typeof property === "symbol") return;
+
+  if (!(property in target)) {
+    throw new Error(`Property ${String(property)} does not exist`);
+  }
+}
+
+function createLogger(
+  serviceName: string,
+  logLevel: "none" | "debug" | "info" | "warn" | "error"
+) {
+  const logLevelMap = {
+    none: 0,
+    error: 1,
+    warn: 2,
+    info: 3,
+    debug: 4,
+  };
+
+  return {
+    debug: (...args: unknown[]) => {
+      if (logLevelMap[logLevel] >= logLevelMap.debug) {
+        console.debug(`[${serviceName}]`, ...args);
+      }
+    },
+    info: (...args: unknown[]) => {
+      if (logLevelMap[logLevel] >= logLevelMap.info) {
+        console.info(`[${serviceName}]`, ...args);
+      }
+    },
+    warn: (...args: unknown[]) => {
+      if (logLevelMap[logLevel] >= logLevelMap.warn) {
+        console.warn(`[${serviceName}]`, ...args);
+      }
+    },
+    error: (...args: unknown[]) => {
+      if (logLevelMap[logLevel] >= logLevelMap.error) {
+        console.error(`[${serviceName}]`, ...args);
+      }
+    },
+  };
+}
+const tempGlobalLogger = createLogger("temp-global", "info");
+
+class ManualPromise<T, E = unknown> {
+  private _internalPromise: Promise<T>;
+  private _internalResolve: (value: T) => void;
+  private _internalReject: (reason?: E) => void;
+
+  constructor() {
+    this._internalResolve = this._noop;
+    this._internalReject = this._noop;
+
+    this._internalPromise = new Promise<T>((promiseResolve, promiseReject) => {
+      this._internalResolve = (value) => {
+        promiseResolve(value);
+        this._resetCallbacks();
+      };
+      this._internalReject = (reason) => {
+        promiseReject(reason);
+        this._resetCallbacks();
+      };
+    });
+  }
+
+  get promise() {
+    return this._internalPromise;
+  }
+
+  resolve(value: T) {
+    this._internalResolve(value);
+  }
+
+  reject(reason?: E) {
+    this._internalReject(reason);
+  }
+
+  reset() {
+    this._resetCallbacks();
+    this._internalPromise = new Promise<T>((promiseResolve, promiseReject) => {
+      this._internalResolve = (value) => {
+        promiseResolve(value);
+        this._resetCallbacks();
+      };
+      this._internalReject = (reason) => {
+        promiseReject(reason);
+        this._resetCallbacks();
+      };
+    });
+  }
+
+  private _resetCallbacks() {
+    this._internalResolve = this._noop;
+    this._internalReject = this._noop;
+  }
+
+  private _noop = (..._args: unknown[]) => {};
+}
+
+class SharedServiceUtils {
+  constructor() {
+    throw new Error("This class cannot be instantiated");
+  }
+
+  static generateId() {
+    return crypto.randomUUID();
+  }
+
+  static getLockName(serviceName: string) {
+    return `shared-service:${serviceName}`;
+  }
+
+  static getSharedChannelName(serviceName: string) {
+    return `shared-service:${serviceName}`;
+  }
+
+  static getClientChannelName(serviceName: string, clientId: string) {
+    return `shared-service:${serviceName}:${clientId}`;
+  }
+
+  static getClientLockName(serviceName: string, clientId: string) {
+    return `shared-service:${serviceName}:${clientId}`;
+  }
+}
+
+class SharedService<T extends object> {
+  private readonly serviceName: string;
+  private readonly service: T;
+  private readonly readyState: ManualPromise<void>;
+  readonly serviceProxy: SharedServiceProxy<T>;
+  private serviceNode?: SharedServiceProvider<T> | SharedServiceClient<T>;
+
+  constructor(options: CreateSharedServiceOptions<T>) {
+    this.serviceName = options.serviceName;
+    this.service = options.service;
+    this.serviceProxy = this._createProxy();
+    this.readyState = new ManualPromise<void>();
+
+    this._registerNode();
+  }
+
+  get ready() {
+    return this.readyState.promise;
+  }
+
+  get isProvider() {
+    return this.serviceNode instanceof SharedServiceProvider;
+  }
+
+  private async _registerNode() {
+    const lockName = SharedServiceUtils.getLockName(this.serviceName);
+
+    const locks = await navigator.locks.query();
+    const sharedServiceLockExists = locks.held?.some(
+      (lock) => lock.name === lockName
+    );
+
+    if (sharedServiceLockExists) {
+      this.serviceNode = new SharedServiceClient<T>({
+        serviceName: this.serviceName,
+      });
+    }
+
+    createInfinitelyOpenLock(lockName, () => {
+      this.serviceNode = new SharedServiceProvider<T>({
+        serviceName: this.serviceName,
+        service: this.service,
+        onReady: () => {
+          this.readyState.resolve();
+        },
+      });
+    });
+  }
+
+  private _createProxy() {
+    return new Proxy(this.service, {
+      get: (target, property) => {
+        return async (...args: unknown[]) => {
+          await this.readyState.promise;
+
+          if (this.serviceNode === undefined) {
+            throw new Error("Service node is not defined");
+          }
+
+          validateProxyProperty(target, property);
+
+          const propertyValue = target[property];
+
+          if (typeof propertyValue !== "function") {
+            return propertyValue;
+          }
+
+          return this.serviceNode.callServiceMethod(property, args);
+        };
+      },
+    }) as SharedServiceProxy<T>;
+  }
+}
+
+class SharedServiceProvider<T extends object> {
+  private readonly serviceName: string;
+  private readonly service: T;
+  private readonly sharedChannel: BroadcastChannel;
+  private readonly registeredClients: Set<string>;
+  private readonly requestsInProcess: Set<string>;
+  private readonly providerInFlightRequestsStore?: KeyValueStore<unknown>;
+  private readonly onReady: () => void | Promise<void>;
+
+  constructor(options: CreateSharedServiceProviderOptions<T>) {
+    this.serviceName = options.serviceName;
+    this.service = options.service;
+    this.onReady = options.onReady;
+    this.sharedChannel = new BroadcastChannel(
+      SharedServiceUtils.getSharedChannelName(this.serviceName)
+    );
+    this.registeredClients = new Set();
+    this.requestsInProcess = new Set();
+    this._init();
+  }
+
+  private async _init() {
+    this._handleClientRegistration();
+    await Promise.all([
+      this._handleElection(),
+      this._handlePreviousProviderUnfinishedRequests(),
+    ]);
+    this.onReady();
+  }
+
+  private _handleClientRegistration() {
+    this.sharedChannel.addEventListener(
+      "message",
+      (e: MessageEvent<SharedChannelEventData>) => {
+        const { type } = e.data;
+        if (type !== "client-registration") return;
+
+        const { clientId } = e.data.payload;
+
+        if (this.registeredClients.has(clientId)) {
+          tempGlobalLogger.error(
+            `Client with id ${clientId} already registered`
+          );
+          return;
+        }
+
+        tempGlobalLogger.info(
+          `Client with id ${clientId} is registering, creating channel...`
+        );
+
+        const clientPrivateChannelName =
+          SharedServiceUtils.getClientChannelName(this.serviceName, clientId);
+        const clientLockName = SharedServiceUtils.getClientLockName(
+          this.serviceName,
+          clientId
+        );
+
+        const clientPrivateChannel = new BroadcastChannel(
+          clientPrivateChannelName
+        );
+
+        navigator.locks.request(clientLockName, { mode: "exclusive" }, () => {
+          tempGlobalLogger.info(
+            `Client with id ${clientId} has disconnected, cleaning up`
+          );
+          this.registeredClients.delete(clientId);
+          clientPrivateChannel.close();
+        });
+
+        clientPrivateChannel.addEventListener(
+          "message",
+          async (e: MessageEvent<ClientPrivateEventData<T>>) => {
+            if (e.data.type === "response") return;
+            const { nonce, methodKey, method, args } = e.data.payload;
+
+            if (this.requestsInProcess.has(nonce)) {
+              tempGlobalLogger.warn(
+                `Request with nonce ${nonce} already in process`
+              );
+              return;
+            }
+            this.requestsInProcess.add(nonce);
+
+            tempGlobalLogger.info(
+              `Received request from client ${clientId} with nonce ${nonce} to call method ${String(
+                methodKey
+              )} with args ${JSON.stringify(args)}`
+            );
+
+            let result: unknown;
+            let error: unknown;
+            try {
+              result = await (this.service[methodKey] as T[keyof T] & Function)(
+                ...args
+              );
+            } catch (e) {
+              error = e;
+            } finally {
+              this.requestsInProcess.delete(nonce);
+            }
+
+            tempGlobalLogger.info(
+              `Sending response to client ${clientId} with nonce ${nonce} with result ${JSON.stringify(
+                result
+              )} and error ${JSON.stringify(error)}`
+            );
+            clientPrivateChannel.postMessage({
+              type: "response",
+              payload: {
+                nonce,
+                result,
+                error,
+              },
+            });
+          }
+        );
+
+        this.registeredClients.add(clientId);
+        tempGlobalLogger.info(`Client with id ${clientId} registered`);
+
+        this.sharedChannel.postMessage({
+          type: "client-registered",
+          payload: {
+            clientId,
+          },
+        });
+      }
+    );
+  }
+
+  private async _handleElection() {
+    this.sharedChannel.postMessage({
+      type: "provider-elected",
+    });
+  }
+
+  private async _handlePreviousProviderUnfinishedRequests() {
+    if (this.providerInFlightRequestsStore === undefined) return;
+    const inFlightRequests = await this.providerInFlightRequestsStore.getAll();
+    // complete here
+  }
+
+  async callServiceMethod(method: keyof T, args: unknown[]) {
+    return (this.service[method] as T[keyof T] & Function)(...args);
+  }
+}
+
+class SharedServiceClient<T extends object> {
+  private readonly id: string;
+  private readonly sharedChannel: BroadcastChannel;
+  private readonly requestsInFlight: Map<string, InFlightRequest<T>>;
+  private readonly clientChannel: BroadcastChannel;
+
+  constructor(options: CreateSharedServiceClientOptions<T>) {
+    this.id = SharedServiceUtils.generateId();
+    const sharedChannelName = SharedServiceUtils.getSharedChannelName(
+      options.serviceName
+    );
+    this.sharedChannel = new BroadcastChannel(sharedChannelName);
+    this.requestsInFlight = new Map();
+    this.clientChannel = new BroadcastChannel(
+      SharedServiceUtils.getClientChannelName(options.serviceName, this.id)
+    );
+    this._init();
+  }
+
+  private async _init() {
+    createInfinitelyOpenLock(
+      SharedServiceUtils.getClientLockName(this.sharedChannel.name, this.id)
+    );
+    await this._registerWithProvider();
+    this._handleProviderElection();
+  }
+
+  private _handleProviderElection() {
+    this.sharedChannel.addEventListener(
+      "message",
+      async (e: MessageEvent<SharedChannelEventData>) => {
+        const { type } = e.data;
+        if (type !== "provider-elected") return;
+
+        await this._registerWithProvider();
+
+        if (this.requestsInFlight.size > 0) {
+          for (const [nonce, { method, args, resolve, reject }] of this
+            .requestsInFlight) {
+            const responseListener = this._createResponseListener(
+              nonce,
+              resolve,
+              reject
+            );
+            this.clientChannel.addEventListener("message", responseListener);
+            this.clientChannel.postMessage({
+              type: "request",
+              payload: {
+                nonce,
+                method,
+                args,
+              },
+            });
+          }
+        }
+      }
+    );
+  }
+
+  private async _registerWithProvider() {
+    await new Promise<void>((resolve) => {
+      const onRegisteredListener = (
+        event: MessageEvent<SharedChannelEventData>
+      ) => {
+        if (
+          event.data.type === "client-registered" &&
+          event.data.payload.clientId === this.id
+        ) {
+          this.sharedChannel.removeEventListener(
+            "message",
+            onRegisteredListener
+          );
+          resolve();
+        }
+      };
+      this.sharedChannel.addEventListener("message", onRegisteredListener);
+      this.sharedChannel.postMessage({
+        type: "client-registration",
+        payload: { clientId: this.id },
+      });
+    });
+    // await this.onConsumerChange?.(this.isConsumer);
+  }
+
+  private _createResponseListener(
+    nonce: string,
+    resolve: (value: unknown) => void,
+    reject: (reason?: unknown) => void
+  ) {
+    const listener = (event: MessageEvent<ClientPrivateEventData<T>>) => {
+      const { type, payload } = event.data;
+      if (type === "request" || payload.nonce !== nonce) return;
+
+      const { result, error } = payload;
+
+      if (error) {
+        reject(error);
+      } else {
+        resolve(result);
+      }
+
+      this.requestsInFlight.delete(nonce);
+      this.clientChannel.removeEventListener("message", listener);
+    };
+
+    return listener;
+  }
+
+  callServiceMethod(method: keyof T, args: unknown[]) {
+    return new Promise((resolve, reject) => {
+      const nonce = SharedServiceUtils.generateId();
+      const responseListener = this._createResponseListener(
+        nonce,
+        resolve,
+        reject
+      );
+      this.clientChannel.addEventListener("message", responseListener);
+      this.clientChannel.postMessage({
+        type: "request",
+        payload: {
+          nonce,
+          method,
+          args,
+        },
+      });
+      this.requestsInFlight.set(nonce, {
+        method,
+        args,
+        resolve,
+        reject,
+      });
+    });
+  }
+}
+
+export function createSharedService<T extends object>(
+  options: CreateSharedServiceOptions<T>
+) {
+  return new SharedService(options);
+}

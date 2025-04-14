@@ -2,6 +2,10 @@ import { KeyValueStore } from "./kv-stores";
 
 type OnProviderElection = (isProvider: boolean) => void | Promise<void>;
 
+type SharedServiceNode<T extends object> = {
+  callServiceMethod: (method: keyof T, args: unknown[]) => Promise<unknown>;
+};
+
 type CreateSharedServiceOptions<T extends object> = {
   serviceName: string;
   service: T;
@@ -190,7 +194,7 @@ function createLogger(
     },
   };
 }
-const tempGlobalLogger = createLogger("temp-global", "info");
+const tempGlobalLogger = createLogger("temp-global", "debug");
 
 class ManualPromise<T, E = unknown> {
   private _internalPromise: Promise<T>;
@@ -278,10 +282,14 @@ class SharedService<T extends object> {
   private readonly service: T;
   private readonly readyState: ManualPromise<void>;
   readonly serviceProxy: SharedServiceProxy<T>;
-  private serviceNode?: SharedServiceProvider<T> | SharedServiceClient<T>;
+  private serviceNode?: SharedServiceNode<T>;
   private readonly onProviderElection: OnProviderElection;
 
   constructor(options: CreateSharedServiceOptions<T>) {
+    tempGlobalLogger.debug(
+      `Creating shared service with name ${options.serviceName}`
+    );
+
     this.serviceName = options.serviceName;
     this.service = options.service;
     this.serviceProxy = this._createProxy();
@@ -290,12 +298,16 @@ class SharedService<T extends object> {
 
     this._registerNode();
 
-    setTimeout(() => {
+    setTimeout(async () => {
+      tempGlobalLogger.debug(
+        `Checking if service node is registered, current value is ${this.serviceNode}`
+      );
       if (!this.serviceNode) {
         tempGlobalLogger.debug(
           "Service node did not register as a provider nor as a client, retrying..."
         );
         retry(async () => {
+          console.log("Retrying...");
           await this._registerNode();
           if (!this.serviceNode) {
             throw new Error(
@@ -316,6 +328,7 @@ class SharedService<T extends object> {
   }
 
   private async _registerNode() {
+    console.log("CALLING _registerNode");
     const lockName = SharedServiceUtils.getLockName(this.serviceName);
 
     const locks = await navigator.locks.query();
@@ -323,7 +336,9 @@ class SharedService<T extends object> {
       (lock) => lock.name === lockName
     );
 
-    console.log(sharedServiceLockExists);
+    tempGlobalLogger.debug(
+      `Shared service lock exists: ${sharedServiceLockExists}`
+    );
 
     if (sharedServiceLockExists) {
       tempGlobalLogger.info(
@@ -374,7 +389,7 @@ class SharedService<T extends object> {
   }
 }
 
-class SharedServiceProvider<T extends object> {
+class SharedServiceProvider<T extends object> implements SharedServiceNode<T> {
   private readonly serviceName: string;
   private readonly service: T;
   private readonly readyState: ManualPromise<void>;
@@ -400,7 +415,7 @@ class SharedServiceProvider<T extends object> {
   private async _init() {
     this._handleClientRegistration();
     await Promise.all([
-      this._handleElection(),
+      this.onProviderElection(true),
       this._handlePreviousProviderUnfinishedRequests(),
     ]);
     this.readyState.resolve();
@@ -506,13 +521,6 @@ class SharedServiceProvider<T extends object> {
     );
   }
 
-  private async _handleElection() {
-    this.sharedChannel.postMessage({
-      type: "provider-elected",
-    });
-    await this.onProviderElection(true);
-  }
-
   private async _handlePreviousProviderUnfinishedRequests() {
     if (this.providerInFlightRequestsStore === undefined) return;
 
@@ -545,7 +553,7 @@ class SharedServiceProvider<T extends object> {
   }
 }
 
-class SharedServiceClient<T extends object> {
+class SharedServiceClient<T extends object> implements SharedServiceNode<T> {
   private readonly id: string;
   private readonly serviceName: string;
   private readonly readyState: ManualPromise<void>;
@@ -574,9 +582,10 @@ class SharedServiceClient<T extends object> {
       this.serviceName,
       this.id
     );
-    createInfinitelyOpenLock(clientLockName, () =>
-      this._registerWithProvider()
-    );
+    createInfinitelyOpenLock(clientLockName, () => {
+      this._registerWithProvider();
+      console.log("AAAA");
+    });
     this._handleProviderElection();
     this.readyState.resolve();
   }
@@ -639,7 +648,6 @@ class SharedServiceClient<T extends object> {
         payload: { clientId: this.id },
       });
     });
-    console.log("AAAAAAAA");
     await this.onProviderElection(false);
   }
 

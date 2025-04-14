@@ -1,21 +1,24 @@
 import { KeyValueStore } from "./kv-stores";
 
-type OnConsumerChange = (isConsumer: boolean) => void | Promise<void>;
+type OnProviderElection = (isProvider: boolean) => void | Promise<void>;
 
 type CreateSharedServiceOptions<T extends object> = {
   serviceName: string;
   service: T;
-  onConsumerChange?: OnConsumerChange;
+  onProviderElection?: OnProviderElection;
 };
 
 type CreateSharedServiceProviderOptions<T> = {
   serviceName: string;
   service: T;
-  onReady: () => void | Promise<void>;
+  readyState: ManualPromise<void>;
+  onProviderElection: OnProviderElection;
 };
 
-type CreateSharedServiceClientOptions<T extends object> = {
+type CreateSharedServiceClientOptions = {
   serviceName: string;
+  readyState: ManualPromise<void>;
+  onProviderElection: OnProviderElection;
 };
 
 type InFlightRequest<T extends object, K extends keyof T = keyof T> = {
@@ -24,6 +27,12 @@ type InFlightRequest<T extends object, K extends keyof T = keyof T> = {
   resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
 };
+
+type ProviderInFlightRequestsKeyValueStore<T extends object> = KeyValueStore<
+  Omit<InFlightRequest<T>, "resolve" | "reject"> & {
+    nonce: string;
+  }
+>;
 
 type SharedServiceProxy<T extends object> = {
   [K in keyof T]: T[K] extends (...args: infer A) => infer R
@@ -61,8 +70,7 @@ type ClientPrivateRequestEventData<
   type: "request";
   payload: {
     nonce: string;
-    methodKey: K;
-    method: T[keyof T] & Function;
+    method: K;
     args: unknown[];
   };
 };
@@ -96,6 +104,7 @@ function createInfinitelyOpenLock(
       await callback(lock);
     }
     await new Promise(() => {});
+    console.log("Lock released");
   });
 }
 
@@ -107,6 +116,42 @@ function validateProxyProperty<T extends object>(
 
   if (!(property in target)) {
     throw new Error(`Property ${String(property)} does not exist`);
+  }
+}
+
+async function retry<T>(
+  fn: () => T | Promise<T>,
+  options: {
+    retries: number;
+    delay: number | ((attempt: number) => number);
+  } = {
+    retries: 3,
+    delay: (attempt: number) => Math.pow(2, attempt) * 250,
+  }
+) {
+  const { retries, delay } = options;
+  if (retries < 0) {
+    throw new Error("Retries must be greater than or equal to 0");
+  }
+  if (typeof delay !== "number" && typeof delay !== "function") {
+    throw new Error("Delay must be a number or a function");
+  }
+
+  let attempt = 0;
+
+  while (attempt <= retries) {
+    try {
+      return await fn();
+    } catch (error) {
+      attempt++;
+      if (attempt > retries) {
+        throw new Error(
+          `Function failed after ${retries + 1} attempts. Error: ${error}`
+        );
+      }
+      const currentDelay = typeof delay === "function" ? delay(attempt) : delay;
+      await new Promise((res) => setTimeout(res, currentDelay));
+    }
   }
 }
 
@@ -234,14 +279,32 @@ class SharedService<T extends object> {
   private readonly readyState: ManualPromise<void>;
   readonly serviceProxy: SharedServiceProxy<T>;
   private serviceNode?: SharedServiceProvider<T> | SharedServiceClient<T>;
+  private readonly onProviderElection: OnProviderElection;
 
   constructor(options: CreateSharedServiceOptions<T>) {
     this.serviceName = options.serviceName;
     this.service = options.service;
     this.serviceProxy = this._createProxy();
     this.readyState = new ManualPromise<void>();
+    this.onProviderElection = options.onProviderElection ?? (() => {});
 
     this._registerNode();
+
+    setTimeout(() => {
+      if (!this.serviceNode) {
+        tempGlobalLogger.debug(
+          "Service node did not register as a provider nor as a client, retrying..."
+        );
+        retry(async () => {
+          await this._registerNode();
+          if (!this.serviceNode) {
+            throw new Error(
+              "Service node did not register as a provider nor as a client"
+            );
+          }
+        });
+      }
+    }, 80);
   }
 
   get ready() {
@@ -260,19 +323,28 @@ class SharedService<T extends object> {
       (lock) => lock.name === lockName
     );
 
+    console.log(sharedServiceLockExists);
+
     if (sharedServiceLockExists) {
+      tempGlobalLogger.info(
+        `Service ${this.serviceName} has a provider, registering as client`
+      );
       this.serviceNode = new SharedServiceClient<T>({
         serviceName: this.serviceName,
+        readyState: this.readyState,
+        onProviderElection: this.onProviderElection,
       });
     }
 
     createInfinitelyOpenLock(lockName, () => {
+      tempGlobalLogger.info(
+        `Service ${this.serviceName} has no provider, registering as provider`
+      );
       this.serviceNode = new SharedServiceProvider<T>({
         serviceName: this.serviceName,
         service: this.service,
-        onReady: () => {
-          this.readyState.resolve();
-        },
+        readyState: this.readyState,
+        onProviderElection: this.onProviderElection,
       });
     });
   }
@@ -305,16 +377,18 @@ class SharedService<T extends object> {
 class SharedServiceProvider<T extends object> {
   private readonly serviceName: string;
   private readonly service: T;
+  private readonly readyState: ManualPromise<void>;
   private readonly sharedChannel: BroadcastChannel;
   private readonly registeredClients: Set<string>;
   private readonly requestsInProcess: Set<string>;
-  private readonly providerInFlightRequestsStore?: KeyValueStore<unknown>;
-  private readonly onReady: () => void | Promise<void>;
+  private readonly providerInFlightRequestsStore?: ProviderInFlightRequestsKeyValueStore<T>;
+  private readonly onProviderElection: OnProviderElection;
 
   constructor(options: CreateSharedServiceProviderOptions<T>) {
     this.serviceName = options.serviceName;
     this.service = options.service;
-    this.onReady = options.onReady;
+    this.readyState = options.readyState;
+    this.onProviderElection = options.onProviderElection;
     this.sharedChannel = new BroadcastChannel(
       SharedServiceUtils.getSharedChannelName(this.serviceName)
     );
@@ -329,7 +403,7 @@ class SharedServiceProvider<T extends object> {
       this._handleElection(),
       this._handlePreviousProviderUnfinishedRequests(),
     ]);
-    this.onReady();
+    this.readyState.resolve();
   }
 
   private _handleClientRegistration() {
@@ -375,7 +449,7 @@ class SharedServiceProvider<T extends object> {
           "message",
           async (e: MessageEvent<ClientPrivateEventData<T>>) => {
             if (e.data.type === "response") return;
-            const { nonce, methodKey, method, args } = e.data.payload;
+            const { nonce, method, args } = e.data.payload;
 
             if (this.requestsInProcess.has(nonce)) {
               tempGlobalLogger.warn(
@@ -387,14 +461,14 @@ class SharedServiceProvider<T extends object> {
 
             tempGlobalLogger.info(
               `Received request from client ${clientId} with nonce ${nonce} to call method ${String(
-                methodKey
+                method
               )} with args ${JSON.stringify(args)}`
             );
 
             let result: unknown;
             let error: unknown;
             try {
-              result = await (this.service[methodKey] as T[keyof T] & Function)(
+              result = await (this.service[method] as T[keyof T] & Function)(
                 ...args
               );
             } catch (e) {
@@ -436,12 +510,34 @@ class SharedServiceProvider<T extends object> {
     this.sharedChannel.postMessage({
       type: "provider-elected",
     });
+    await this.onProviderElection(true);
   }
 
   private async _handlePreviousProviderUnfinishedRequests() {
     if (this.providerInFlightRequestsStore === undefined) return;
-    const inFlightRequests = await this.providerInFlightRequestsStore.getAll();
-    // complete here
+
+    const unfinishedRequests =
+      await this.providerInFlightRequestsStore.getAll();
+    if (unfinishedRequests.length > 0) {
+      await Promise.allSettled(
+        unfinishedRequests.map(async ({ nonce, method, args }) => {
+          try {
+            const methodToCall = this.service[method];
+            if (typeof methodToCall !== "function") {
+              throw new Error(`Method ${String(method)} is not a function`);
+            }
+            await methodToCall(...args);
+            this.providerInFlightRequestsStore?.delete(nonce);
+          } catch (error) {
+            tempGlobalLogger.error(
+              `Error occurred while invoking method ${String(method)}: ${error}`
+            );
+          } finally {
+            this.providerInFlightRequestsStore?.delete(nonce);
+          }
+        })
+      );
+    }
   }
 
   async callServiceMethod(method: keyof T, args: unknown[]) {
@@ -451,29 +547,38 @@ class SharedServiceProvider<T extends object> {
 
 class SharedServiceClient<T extends object> {
   private readonly id: string;
+  private readonly serviceName: string;
+  private readonly readyState: ManualPromise<void>;
+  private readonly onProviderElection: OnProviderElection;
   private readonly sharedChannel: BroadcastChannel;
-  private readonly requestsInFlight: Map<string, InFlightRequest<T>>;
   private readonly clientChannel: BroadcastChannel;
+  private readonly requestsInFlight: Map<string, InFlightRequest<T>>;
 
-  constructor(options: CreateSharedServiceClientOptions<T>) {
+  constructor(options: CreateSharedServiceClientOptions) {
     this.id = SharedServiceUtils.generateId();
-    const sharedChannelName = SharedServiceUtils.getSharedChannelName(
-      options.serviceName
+    this.serviceName = options.serviceName;
+    this.readyState = options.readyState;
+    this.onProviderElection = options.onProviderElection;
+    this.sharedChannel = new BroadcastChannel(
+      SharedServiceUtils.getSharedChannelName(options.serviceName)
     );
-    this.sharedChannel = new BroadcastChannel(sharedChannelName);
-    this.requestsInFlight = new Map();
     this.clientChannel = new BroadcastChannel(
       SharedServiceUtils.getClientChannelName(options.serviceName, this.id)
     );
+    this.requestsInFlight = new Map();
     this._init();
   }
 
   private async _init() {
-    createInfinitelyOpenLock(
-      SharedServiceUtils.getClientLockName(this.sharedChannel.name, this.id)
+    const clientLockName = SharedServiceUtils.getClientLockName(
+      this.serviceName,
+      this.id
     );
-    await this._registerWithProvider();
+    createInfinitelyOpenLock(clientLockName, () =>
+      this._registerWithProvider()
+    );
     this._handleProviderElection();
+    this.readyState.resolve();
   }
 
   private _handleProviderElection() {
@@ -483,7 +588,11 @@ class SharedServiceClient<T extends object> {
         const { type } = e.data;
         if (type !== "provider-elected") return;
 
+        this.readyState.reset();
+
         await this._registerWithProvider();
+
+        this.readyState.resolve();
 
         if (this.requestsInFlight.size > 0) {
           for (const [nonce, { method, args, resolve, reject }] of this
@@ -530,7 +639,8 @@ class SharedServiceClient<T extends object> {
         payload: { clientId: this.id },
       });
     });
-    // await this.onConsumerChange?.(this.isConsumer);
+    console.log("AAAAAAAA");
+    await this.onProviderElection(false);
   }
 
   private _createResponseListener(

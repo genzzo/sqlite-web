@@ -1,7 +1,6 @@
 import "./style.css";
-import { createSharedService } from "./shared-service.ts";
+import { createSharedService } from "./split-shared-service.ts";
 import { createWorkerClient } from "./utils.ts";
-import { createNewSharedService } from "./shared-service-2.ts";
 
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <div>
@@ -100,23 +99,22 @@ const mockService = {
   },
 };
 
-const sharedServiceNew = createNewSharedService({
-  serviceName: "NEWNEWNEDDW",
-  service: mockService,
-});
-
 const s = createSharedService({
   serviceName: "counter",
   service: mockService,
-  async onConsumerChange(isConsumer) {
+  async onProviderElection(isProvider) {
     // await new Promise((r) => setTimeout(r, randomInt() * 5));
-    logElement.style.display = isConsumer ? "block" : "none";
+    console.log("Provider election:", isProvider);
+    logElement.style.display = isProvider ? "block" : "none";
   },
-  logLevel: "none",
+  // logLevel: "none",
 });
 
-const res = s.slowAdd(randomInt(), randomInt());
-console.log("Result from slow add:", await res);
+(async () => {
+  await s.ready;
+  await s.serviceProxy.add(randomInt(), randomInt());
+})();
+// console.log("Result from slow add:", await res);
 // s.service.subtract(randomInt(), randomInt());
 // s.service.multiply(randomInt(), randomInt());
 
@@ -135,7 +133,7 @@ console.log("Result from slow add:", await res);
   document
     .querySelector<HTMLButtonElement>(`#service-${method}`)!
     .addEventListener("click", () => {
-      s[method](randomInt(), randomInt());
+      s.serviceProxy[method](randomInt(), randomInt());
     });
 });
 

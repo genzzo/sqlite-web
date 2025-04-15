@@ -1,0 +1,91 @@
+.log-container {
+  position: relative;
+}
+
+#log {
+  height: 200px;
+  background-color: #1a1a1a;
+  border-radius: 0.25rem;
+  padding: 0.25em 1em;
+  color: #888;
+  overflow: auto;
+  font-family: monospace;
+}
+
+#log p {
+  text-align: left;
+  margin: 0.2em 0;
+}
+
+#log #clear-log {
+  position: absolute;
+  top: 0.5em;
+  right: 0.5em;
+  background-color: #1a1a1a;
+  border: 1px solid #888;
+  color: #888;
+  border-radius: 100vh;
+  padding: 0.2em 0.5em;
+  transition: color 0.25s;
+  cursor: pointer;
+  font-size: 0.9em;
+  font-weight: 500;
+}
+
+#log #clear-log span {
+  display: inline-block;
+  max-width: 0;
+  padding-inline-start: 0;
+  vertical-align: middle;
+  overflow: hidden;
+  transition: max-width 0.25s, padding-inline-start 0.2s;
+}
+
+#log #clear-log:hover {
+  color: #fff;
+}
+#log #clear-log:hover span,
+#log #clear-log:focus-visible span {
+  max-width: 100px;
+  padding-inline-start: 0.5em;
+}
+#log #clear-log:focus,
+#log #clear-log:focus-visible {
+  outline: 4px auto -webkit-focus-ring-color;
+}
+
+#count {
+  font-size: 1.5em;
+  font-weight: 500;
+  color: #fff;
+}
+
+.service-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+  gap: 0.5em;
+  padding: 2em;
+
+  @media (max-width: 800px) {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.service-actions > button {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0.6em 1.2em;
+  font-size: 1em;
+  font-weight: 500;
+  font-family: inherit;
+  background-color: #1a1a1a;
+  cursor: pointer;
+  transition: border-color 0.25s;
+}
+.service-actions > button:hover {
+  border-color: #646cff;
+}
+.service-actions > button:focus,
+.service-actions > button:focus-visible {
+  outline: 4px auto -webkit-focus-ring-color;
+}

@@ -194,21 +194,26 @@ function createLogger(
 const tempGlobalLogger = createLogger("temp-global", "none");
 
 class ManualPromise<T, E = unknown> {
+  isPending: boolean;
   private _internalPromise: Promise<T>;
   private _internalResolve: (value: T) => void;
   private _internalReject: (reason?: E) => void;
 
   constructor() {
+    this.isPending = true;
+
     this._internalResolve = this._noop;
     this._internalReject = this._noop;
 
     this._internalPromise = new Promise<T>((promiseResolve, promiseReject) => {
       this._internalResolve = (value) => {
         promiseResolve(value);
+        this.isPending = false;
         this._resetCallbacks();
       };
       this._internalReject = (reason) => {
         promiseReject(reason);
+        this.isPending = false;
         this._resetCallbacks();
       };
     });
@@ -227,14 +232,19 @@ class ManualPromise<T, E = unknown> {
   }
 
   reset() {
+    if (this.isPending) return;
+
+    this.isPending = true;
     this._resetCallbacks();
     this._internalPromise = new Promise<T>((promiseResolve, promiseReject) => {
       this._internalResolve = (value) => {
         promiseResolve(value);
+        this.isPending = false;
         this._resetCallbacks();
       };
       this._internalReject = (reason) => {
         promiseReject(reason);
+        this.isPending = false;
         this._resetCallbacks();
       };
     });
@@ -674,6 +684,7 @@ class SharedServiceClient<T extends object> implements SharedServiceNode<T> {
           resolve();
         }
       };
+
       this.sharedChannel.addEventListener("message", onRegisteredListener);
       this.sharedChannel.postMessage({
         type: "client-registration",

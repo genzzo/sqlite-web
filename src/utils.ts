@@ -10,37 +10,24 @@ export function isBrowserContext() {
   );
 }
 
-export function defineWorkerApi<
-  T extends Record<
-    string,
-    ((...args: any[]) => any) | ((...args: any[]) => Promise<any>)
-  >
->(worker: DedicatedWorkerGlobalScope, api: T) {
+export function defineWorkerApi<T extends Record<string, unknown>>(
+  worker: DedicatedWorkerGlobalScope,
+  api: T
+) {
   type MessageEventData = {
-    method: keyof T;
+    property: keyof T;
     args?: unknown[];
   };
 
   const apiMethods = Object.keys(api) as (keyof T)[];
-  const nonFunctionMethods = apiMethods.filter(
-    (method) => typeof api[method] !== "function"
-  );
-
-  if (nonFunctionMethods.length > 0) {
-    throw new Error(
-      `All API methods must be functions. Invalid methods: ${nonFunctionMethods.join(
-        ", "
-      )}`
-    );
-  }
 
   worker.addEventListener("message", async (e: MessageEvent<unknown>) => {
     const data = e.data;
-    if (typeof data !== "object" || !data || !("method" in data))
+    if (typeof data !== "object" || !data || !("property" in data))
       throw new Error("Invalid message data");
 
-    if (!apiMethods.includes(data.method as keyof T)) {
-      throw new Error(`Unknown method: ${data.method}`);
+    if (!apiMethods.includes(data.property as keyof T)) {
+      throw new Error(`Unknown property: ${data.property}`);
     }
 
     if ("args" in data && !Array.isArray(data.args)) {
@@ -49,13 +36,18 @@ export function defineWorkerApi<
       );
     }
 
-    const { method, args = [] } = data as MessageEventData;
+    const { property, args = [] } = data as MessageEventData;
 
     let result: unknown;
     let error: unknown;
     try {
-      const methodFunction = api[method as keyof T];
-      result = await methodFunction(...args);
+      const propertyValue = api[property];
+
+      if (typeof propertyValue !== "function") {
+        result = propertyValue;
+      } else {
+        result = await propertyValue(...args);
+      }
     } catch (e) {
       error = e;
     }
@@ -69,15 +61,18 @@ export function defineWorkerApi<
   });
 }
 
-export function createWorkerClient<
-  T extends Record<string, (...args: any[]) => any>
->(
+type ProxyClient<T> = {
+  [K in keyof T]: T[K] extends Function
+    ? // @ts-expect-error need to handle multiple overloads
+      (...args: Parameters<T[K]>) => Promise<ReturnType<T[K]>>
+    : () => Promise<T[K]>;
+};
+
+export function createWorkerClient<T extends object>(
   worker: Worker
-): {
-  [K in keyof T]: (...args: Parameters<T[K]>) => Promise<ReturnType<T[K]>>;
-} {
+): ProxyClient<T> {
   const proxyHandler: ProxyHandler<T> = {
-    get: (_target, method: string) => {
+    get: (_target, property) => {
       return (...args: any[]) => {
         return new Promise((resolve, reject) => {
           const channel = new MessageChannel();
@@ -96,7 +91,7 @@ export function createWorkerClient<
 
           worker.postMessage(
             {
-              method,
+              property,
               args,
             },
             [channel.port2]
@@ -106,5 +101,5 @@ export function createWorkerClient<
     },
   };
 
-  return new Proxy({} as T, proxyHandler);
+  return new Proxy({} as T, proxyHandler) as ProxyClient<T>;
 }

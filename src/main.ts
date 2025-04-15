@@ -1,2 +1,2 @@
 import "./style.css";
-import "./setups/todos";
+import "./setups/db";

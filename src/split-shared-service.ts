@@ -4,6 +4,7 @@ type OnProviderElection = (isProvider: boolean) => void | Promise<void>;
 
 type SharedServiceNode<T extends object> = {
   callServiceMethod: (method: keyof T, args: unknown[]) => Promise<unknown>;
+  destroy: () => void;
 };
 
 type CreateSharedServiceOptions<T extends object> = {
@@ -108,7 +109,6 @@ function createInfinitelyOpenLock(
       await callback(lock);
     }
     await new Promise(() => {});
-    console.log("Lock released");
   });
 }
 
@@ -136,9 +136,6 @@ async function retry<T>(
   const { retries, delay } = options;
   if (retries < 0) {
     throw new Error("Retries must be greater than or equal to 0");
-  }
-  if (typeof delay !== "number" && typeof delay !== "function") {
-    throw new Error("Delay must be a number or a function");
   }
 
   let attempt = 0;
@@ -194,7 +191,7 @@ function createLogger(
     },
   };
 }
-const tempGlobalLogger = createLogger("temp-global", "debug");
+const tempGlobalLogger = createLogger("temp-global", "none");
 
 class ManualPromise<T, E = unknown> {
   private _internalPromise: Promise<T>;
@@ -285,6 +282,8 @@ class SharedService<T extends object> {
   private serviceNode?: SharedServiceNode<T>;
   private readonly onProviderElection: OnProviderElection;
 
+  private static REGISTRATION_TIMEOUT = 500;
+
   constructor(options: CreateSharedServiceOptions<T>) {
     tempGlobalLogger.debug(
       `Creating shared service with name ${options.serviceName}`
@@ -307,7 +306,6 @@ class SharedService<T extends object> {
           "Service node did not register as a provider nor as a client, retrying..."
         );
         retry(async () => {
-          console.log("Retrying...");
           await this._registerNode();
           if (!this.serviceNode) {
             throw new Error(
@@ -316,7 +314,7 @@ class SharedService<T extends object> {
           }
         });
       }
-    }, 80);
+    }, SharedService.REGISTRATION_TIMEOUT);
   }
 
   get ready() {
@@ -328,13 +326,19 @@ class SharedService<T extends object> {
   }
 
   private async _registerNode() {
-    console.log("CALLING _registerNode");
     const lockName = SharedServiceUtils.getLockName(this.serviceName);
 
     const locks = await navigator.locks.query();
     const sharedServiceLockExists = locks.held?.some(
       (lock) => lock.name === lockName
     );
+
+    if (this.serviceNode) {
+      tempGlobalLogger.debug(
+        `Service node already registered, this is likely due to having multiple instances of the service being registered at the same time causing the retry to fail`
+      );
+      return;
+    }
 
     tempGlobalLogger.debug(
       `Shared service lock exists: ${sharedServiceLockExists}`
@@ -355,6 +359,7 @@ class SharedService<T extends object> {
       tempGlobalLogger.info(
         `Service ${this.serviceName} has no provider, registering as provider`
       );
+      this.serviceNode?.destroy();
       this.serviceNode = new SharedServiceProvider<T>({
         serviceName: this.serviceName,
         service: this.service,
@@ -397,6 +402,7 @@ class SharedServiceProvider<T extends object> implements SharedServiceNode<T> {
   private readonly registeredClients: Set<string>;
   private readonly requestsInProcess: Set<string>;
   private readonly providerInFlightRequestsStore?: ProviderInFlightRequestsKeyValueStore<T>;
+  private readonly cleanupCallbacks: Array<() => void>;
   private readonly onProviderElection: OnProviderElection;
 
   constructor(options: CreateSharedServiceProviderOptions<T>) {
@@ -409,116 +415,132 @@ class SharedServiceProvider<T extends object> implements SharedServiceNode<T> {
     );
     this.registeredClients = new Set();
     this.requestsInProcess = new Set();
+    this.cleanupCallbacks = [];
     this._init();
   }
 
   private async _init() {
     this._handleClientRegistration();
     await Promise.all([
-      this.onProviderElection(true),
+      this._handleElection(),
       this._handlePreviousProviderUnfinishedRequests(),
     ]);
     this.readyState.resolve();
   }
 
   private _handleClientRegistration() {
-    this.sharedChannel.addEventListener(
-      "message",
-      (e: MessageEvent<SharedChannelEventData>) => {
-        const { type } = e.data;
-        if (type !== "client-registration") return;
+    const clientRegistrationListener = (
+      e: MessageEvent<SharedChannelEventData>
+    ) => {
+      const { type } = e.data;
+      if (type !== "client-registration") return;
 
-        const { clientId } = e.data.payload;
+      const { clientId } = e.data.payload;
 
-        if (this.registeredClients.has(clientId)) {
-          tempGlobalLogger.error(
-            `Client with id ${clientId} already registered`
-          );
-          return;
-        }
-
-        tempGlobalLogger.info(
-          `Client with id ${clientId} is registering, creating channel...`
-        );
-
-        const clientPrivateChannelName =
-          SharedServiceUtils.getClientChannelName(this.serviceName, clientId);
-        const clientLockName = SharedServiceUtils.getClientLockName(
-          this.serviceName,
-          clientId
-        );
-
-        const clientPrivateChannel = new BroadcastChannel(
-          clientPrivateChannelName
-        );
-
-        navigator.locks.request(clientLockName, { mode: "exclusive" }, () => {
-          tempGlobalLogger.info(
-            `Client with id ${clientId} has disconnected, cleaning up`
-          );
-          this.registeredClients.delete(clientId);
-          clientPrivateChannel.close();
-        });
-
-        clientPrivateChannel.addEventListener(
-          "message",
-          async (e: MessageEvent<ClientPrivateEventData<T>>) => {
-            if (e.data.type === "response") return;
-            const { nonce, method, args } = e.data.payload;
-
-            if (this.requestsInProcess.has(nonce)) {
-              tempGlobalLogger.warn(
-                `Request with nonce ${nonce} already in process`
-              );
-              return;
-            }
-            this.requestsInProcess.add(nonce);
-
-            tempGlobalLogger.info(
-              `Received request from client ${clientId} with nonce ${nonce} to call method ${String(
-                method
-              )} with args ${JSON.stringify(args)}`
-            );
-
-            let result: unknown;
-            let error: unknown;
-            try {
-              result = await (this.service[method] as T[keyof T] & Function)(
-                ...args
-              );
-            } catch (e) {
-              error = e;
-            } finally {
-              this.requestsInProcess.delete(nonce);
-            }
-
-            tempGlobalLogger.info(
-              `Sending response to client ${clientId} with nonce ${nonce} with result ${JSON.stringify(
-                result
-              )} and error ${JSON.stringify(error)}`
-            );
-            clientPrivateChannel.postMessage({
-              type: "response",
-              payload: {
-                nonce,
-                result,
-                error,
-              },
-            });
-          }
-        );
-
-        this.registeredClients.add(clientId);
-        tempGlobalLogger.info(`Client with id ${clientId} registered`);
-
-        this.sharedChannel.postMessage({
-          type: "client-registered",
-          payload: {
-            clientId,
-          },
-        });
+      if (this.registeredClients.has(clientId)) {
+        tempGlobalLogger.error(`Client with id ${clientId} already registered`);
+        return;
       }
-    );
+
+      tempGlobalLogger.info(
+        `Client with id ${clientId} is registering, creating channel...`
+      );
+
+      const clientPrivateChannelName = SharedServiceUtils.getClientChannelName(
+        this.serviceName,
+        clientId
+      );
+      const clientLockName = SharedServiceUtils.getClientLockName(
+        this.serviceName,
+        clientId
+      );
+
+      const clientPrivateChannel = new BroadcastChannel(
+        clientPrivateChannelName
+      );
+
+      navigator.locks.request(clientLockName, { mode: "exclusive" }, () => {
+        tempGlobalLogger.info(
+          `Client with id ${clientId} has disconnected, cleaning up`
+        );
+        this.registeredClients.delete(clientId);
+        clientPrivateChannel.close();
+      });
+
+      clientPrivateChannel.addEventListener(
+        "message",
+        async (e: MessageEvent<ClientPrivateEventData<T>>) => {
+          if (e.data.type === "response") return;
+          const { nonce, method, args } = e.data.payload;
+
+          if (this.requestsInProcess.has(nonce)) {
+            tempGlobalLogger.warn(
+              `Request with nonce ${nonce} already in process`
+            );
+            return;
+          }
+          this.requestsInProcess.add(nonce);
+
+          tempGlobalLogger.info(
+            `Received request from client ${clientId} with nonce ${nonce} to call method ${String(
+              method
+            )} with args ${JSON.stringify(args)}`
+          );
+
+          let result: unknown;
+          let error: unknown;
+          try {
+            result = await (this.service[method] as T[keyof T] & Function)(
+              ...args
+            );
+          } catch (e) {
+            error = e;
+          } finally {
+            this.requestsInProcess.delete(nonce);
+          }
+
+          tempGlobalLogger.info(
+            `Sending response to client ${clientId} with nonce ${nonce} with result ${JSON.stringify(
+              result
+            )} and error ${JSON.stringify(error)}`
+          );
+          clientPrivateChannel.postMessage({
+            type: "response",
+            payload: {
+              nonce,
+              result,
+              error,
+            },
+          });
+        }
+      );
+
+      this.registeredClients.add(clientId);
+      tempGlobalLogger.info(`Client with id ${clientId} registered`);
+
+      this.sharedChannel.postMessage({
+        type: "client-registered",
+        payload: {
+          clientId,
+        },
+      });
+    };
+
+    this.sharedChannel.addEventListener("message", clientRegistrationListener);
+
+    this.cleanupCallbacks.push(() => {
+      this.sharedChannel.removeEventListener(
+        "message",
+        clientRegistrationListener
+      );
+    });
+  }
+
+  private async _handleElection() {
+    this.sharedChannel.postMessage({
+      type: "provider-elected",
+    });
+    await this.onProviderElection(true);
   }
 
   private async _handlePreviousProviderUnfinishedRequests() {
@@ -551,6 +573,12 @@ class SharedServiceProvider<T extends object> implements SharedServiceNode<T> {
   async callServiceMethod(method: keyof T, args: unknown[]) {
     return (this.service[method] as T[keyof T] & Function)(...args);
   }
+
+  destroy() {
+    this.registeredClients.clear();
+    this.requestsInProcess.clear();
+    this.cleanupCallbacks.forEach((cleanup) => cleanup());
+  }
 }
 
 class SharedServiceClient<T extends object> implements SharedServiceNode<T> {
@@ -561,6 +589,7 @@ class SharedServiceClient<T extends object> implements SharedServiceNode<T> {
   private readonly sharedChannel: BroadcastChannel;
   private readonly clientChannel: BroadcastChannel;
   private readonly requestsInFlight: Map<string, InFlightRequest<T>>;
+  private readonly cleanupCallbacks: Array<() => void>;
 
   constructor(options: CreateSharedServiceClientOptions) {
     this.id = SharedServiceUtils.generateId();
@@ -574,6 +603,7 @@ class SharedServiceClient<T extends object> implements SharedServiceNode<T> {
       SharedServiceUtils.getClientChannelName(options.serviceName, this.id)
     );
     this.requestsInFlight = new Map();
+    this.cleanupCallbacks = [];
     this._init();
   }
 
@@ -584,46 +614,53 @@ class SharedServiceClient<T extends object> implements SharedServiceNode<T> {
     );
     createInfinitelyOpenLock(clientLockName, () => {
       this._registerWithProvider();
-      console.log("AAAA");
     });
     this._handleProviderElection();
     this.readyState.resolve();
   }
 
   private _handleProviderElection() {
-    this.sharedChannel.addEventListener(
-      "message",
-      async (e: MessageEvent<SharedChannelEventData>) => {
-        const { type } = e.data;
-        if (type !== "provider-elected") return;
+    const providerElectionListener = async (
+      e: MessageEvent<SharedChannelEventData>
+    ) => {
+      const { type } = e.data;
+      if (type !== "provider-elected") return;
 
-        this.readyState.reset();
+      this.readyState.reset();
 
-        await this._registerWithProvider();
+      await this._registerWithProvider();
 
-        this.readyState.resolve();
+      this.readyState.resolve();
 
-        if (this.requestsInFlight.size > 0) {
-          for (const [nonce, { method, args, resolve, reject }] of this
-            .requestsInFlight) {
-            const responseListener = this._createResponseListener(
+      if (this.requestsInFlight.size > 0) {
+        for (const [nonce, { method, args, resolve, reject }] of this
+          .requestsInFlight) {
+          const responseListener = this._createResponseListener(
+            nonce,
+            resolve,
+            reject
+          );
+          this.clientChannel.addEventListener("message", responseListener);
+          this.clientChannel.postMessage({
+            type: "request",
+            payload: {
               nonce,
-              resolve,
-              reject
-            );
-            this.clientChannel.addEventListener("message", responseListener);
-            this.clientChannel.postMessage({
-              type: "request",
-              payload: {
-                nonce,
-                method,
-                args,
-              },
-            });
-          }
+              method,
+              args,
+            },
+          });
         }
       }
-    );
+    };
+
+    this.sharedChannel.addEventListener("message", providerElectionListener);
+
+    this.cleanupCallbacks.push(() => {
+      this.sharedChannel.removeEventListener(
+        "message",
+        providerElectionListener
+      );
+    });
   }
 
   private async _registerWithProvider() {
@@ -699,6 +736,12 @@ class SharedServiceClient<T extends object> implements SharedServiceNode<T> {
         reject,
       });
     });
+  }
+
+  destroy() {
+    this.requestsInFlight.clear();
+    this.clientChannel.close();
+    this.cleanupCallbacks.forEach((cleanup) => cleanup());
   }
 }
 

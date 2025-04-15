@@ -1,2 +1,2 @@
 import "./style.css";
-import "./setups/math";
+import "./setups/todos";

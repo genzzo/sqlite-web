@@ -61,7 +61,6 @@ export function defineWorkerApi<
     }
 
     const sender = e.ports[0];
-    console.log(e.ports);
 
     sender.postMessage({
       result,

@@ -372,19 +372,18 @@ class SharedService<T extends object> {
   private _createProxy() {
     return new Proxy(this.service, {
       get: (target, property) => {
+        validateProxyProperty(target, property);
+
+        const propertyValue = target[property];
+
+        if (typeof propertyValue !== "function") {
+          return propertyValue;
+        }
+
         return async (...args: unknown[]) => {
           await this.readyState.promise;
-
           if (this.serviceNode === undefined) {
             throw new Error("Service node is not defined");
-          }
-
-          validateProxyProperty(target, property);
-
-          const propertyValue = target[property];
-
-          if (typeof propertyValue !== "function") {
-            return propertyValue;
           }
 
           return this.serviceNode.callServiceMethod(property, args);
@@ -616,7 +615,6 @@ class SharedServiceClient<T extends object> implements SharedServiceNode<T> {
       this._registerWithProvider();
     });
     this._handleProviderElection();
-    this.readyState.resolve();
   }
 
   private _handleProviderElection() {
@@ -626,11 +624,7 @@ class SharedServiceClient<T extends object> implements SharedServiceNode<T> {
       const { type } = e.data;
       if (type !== "provider-elected") return;
 
-      this.readyState.reset();
-
       await this._registerWithProvider();
-
-      this.readyState.resolve();
 
       if (this.requestsInFlight.size > 0) {
         for (const [nonce, { method, args, resolve, reject }] of this
@@ -664,6 +658,7 @@ class SharedServiceClient<T extends object> implements SharedServiceNode<T> {
   }
 
   private async _registerWithProvider() {
+    this.readyState.reset();
     await new Promise<void>((resolve) => {
       const onRegisteredListener = (
         event: MessageEvent<SharedChannelEventData>
@@ -686,6 +681,7 @@ class SharedServiceClient<T extends object> implements SharedServiceNode<T> {
       });
     });
     await this.onProviderElection(false);
+    this.readyState.resolve();
   }
 
   private _createResponseListener(

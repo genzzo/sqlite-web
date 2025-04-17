@@ -1,4 +1,5 @@
 import { KeyValueStore } from "./kv-stores";
+import { ManualPromise } from "./utils";
 
 type OnProviderElection = (isProvider: boolean) => void | Promise<void>;
 
@@ -192,71 +193,6 @@ function createLogger(
   };
 }
 const tempGlobalLogger = createLogger("temp-global", "none");
-
-class ManualPromise<T, E = unknown> {
-  isPending: boolean;
-  private _internalPromise: Promise<T>;
-  private _internalResolve: (value: T) => void;
-  private _internalReject: (reason?: E) => void;
-
-  constructor() {
-    this.isPending = true;
-
-    this._internalResolve = this._noop;
-    this._internalReject = this._noop;
-
-    this._internalPromise = new Promise<T>((promiseResolve, promiseReject) => {
-      this._internalResolve = (value) => {
-        promiseResolve(value);
-        this.isPending = false;
-        this._resetCallbacks();
-      };
-      this._internalReject = (reason) => {
-        promiseReject(reason);
-        this.isPending = false;
-        this._resetCallbacks();
-      };
-    });
-  }
-
-  get promise() {
-    return this._internalPromise;
-  }
-
-  resolve(value: T) {
-    this._internalResolve(value);
-  }
-
-  reject(reason?: E) {
-    this._internalReject(reason);
-  }
-
-  reset() {
-    if (this.isPending) return;
-
-    this.isPending = true;
-    this._resetCallbacks();
-    this._internalPromise = new Promise<T>((promiseResolve, promiseReject) => {
-      this._internalResolve = (value) => {
-        promiseResolve(value);
-        this.isPending = false;
-        this._resetCallbacks();
-      };
-      this._internalReject = (reason) => {
-        promiseReject(reason);
-        this.isPending = false;
-        this._resetCallbacks();
-      };
-    });
-  }
-
-  private _resetCallbacks() {
-    this._internalResolve = this._noop;
-    this._internalReject = this._noop;
-  }
-
-  private _noop = (..._args: unknown[]) => {};
-}
 
 class SharedServiceUtils {
   constructor() {

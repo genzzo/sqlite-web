@@ -1,5 +1,106 @@
 /// <reference lib="webworker" />
 
+type ManualPromiseOptions<E = unknown> = {
+  /**
+   * Forces the promise to be reset, even if it is not pending. Defaults to false.
+   */
+  forceReset?: boolean;
+  /**
+   * The reason for rejecting the promise when it is reset. This is only used when the promise is still pending or when `forceReset` is set to true. Defaults to `"PROMISE_RESET_WHILE_PENDING"`.
+   */
+  onPendingResetRejectionReason?: E;
+};
+
+type ManualPromiseResetOptions<E> = {
+  /**
+   * Forces the promise to be reset, even if it is not pending. Defaults to false.
+   */
+  force?: boolean;
+  /**
+   * The reason for rejecting the promise when it is reset. This is only used when the promise is still pending or when `force` is set to true. Defaults to the `onPendingResetRejectionReason` provided in the constructor or `"PROMISE_RESET_WHILE_PENDING"`.
+   */
+  onPendingRejectionReason?: E;
+};
+
+export class ManualPromise<T, E = unknown> {
+  isPending: boolean;
+  private readonly options: ManualPromiseOptions<E>;
+  private _internalPromise: Promise<T>;
+  private _internalResolve: (value: T) => void;
+  private _internalReject: (reason?: E) => void;
+
+  constructor(options?: ManualPromiseOptions<E>) {
+    this.isPending = true;
+    this.options = {
+      forceReset: false,
+      onPendingResetRejectionReason: "PROMISE_RESET_WHILE_PENDING" as E,
+      ...options,
+    };
+
+    this._internalResolve = this._noop;
+    this._internalReject = this._noop;
+
+    this._internalPromise = new Promise<T>((promiseResolve, promiseReject) => {
+      this._internalResolve = (value) => {
+        promiseResolve(value);
+        this.isPending = false;
+        this._resetCallbacks();
+      };
+      this._internalReject = (reason) => {
+        promiseReject(reason);
+        this.isPending = false;
+        this._resetCallbacks();
+      };
+    });
+  }
+
+  get promise() {
+    return this._internalPromise;
+  }
+
+  resolve(value: T) {
+    this._internalResolve(value);
+  }
+
+  reject(reason?: E) {
+    this._internalReject(reason);
+  }
+
+  reset(options?: ManualPromiseResetOptions<E>) {
+    const { force, onPendingRejectionReason } = {
+      force: false,
+      onPendingRejectionReason: this.options.onPendingResetRejectionReason,
+      ...options,
+    };
+
+    if (this.isPending && !force) return;
+
+    this._internalReject(onPendingRejectionReason);
+
+    this.isPending = true;
+    this._resetCallbacks();
+    this._internalPromise = new Promise<T>((promiseResolve, promiseReject) => {
+      this._internalResolve = (value) => {
+        promiseResolve(value);
+        this.isPending = false;
+        this._resetCallbacks();
+      };
+      this._internalReject = (reason) => {
+        promiseReject(reason);
+        this.isPending = false;
+        this._resetCallbacks();
+      };
+    });
+  }
+
+  private _resetCallbacks() {
+    this._internalResolve = this._noop;
+    this._internalReject = this._noop;
+  }
+
+  private _noop = (..._args: unknown[]) => {};
+}
+
 export function isBrowserContext() {
   return (
     typeof window !== "undefined" ||

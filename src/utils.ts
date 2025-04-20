@@ -162,10 +162,11 @@ export function defineWorkerApi<T extends Record<string, unknown>>(
   });
 }
 
-type ProxyClient<T> = {
-  [K in keyof T]: T[K] extends Function
-    ? // @ts-expect-error need to handle multiple overloads
-      (...args: Parameters<T[K]>) => Promise<ReturnType<T[K]>>
+export type ProxyClient<T> = {
+  [K in keyof T]: T[K] extends (...args: infer A) => infer R
+    ? R extends Promise<unknown>
+      ? T[K]
+      : (...args: A) => Promise<R>
     : () => Promise<T[K]>;
 };
 
